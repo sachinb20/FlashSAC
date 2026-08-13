@@ -17,6 +17,12 @@ max_episode_steps: null
 headless: true
 enable_cameras: false
 device: 'cuda:0'
+# record_video=true switches the env's render_mode to 'rgb_array' at construction time so
+# record_video() in evaluation.py can call env.render(); it requires enable_cameras=true too
+# (offscreen rendering). Train/eval/record share one sim instance here (one SimulationApp per
+# process), so turning this on adds render overhead to every training step, not just the
+# recording passes -- unlike the Genesis env, whose camera is always-on and free of this cost.
+record_video: false
 
 # Actuator / asset -- isaac_go2_actuator_model=unitree_go2hv, isaac_go2_asset_source=unitree_urdf
 isaac_go2_actuator_model: 'dc_motor'          # 'dc_motor' or 'unitree_go2hv'
@@ -42,6 +48,12 @@ isaac_direct_velocity_genesis_style_termination_enabled: false
 isaac_direct_velocity_termination_roll_threshold: 0.4
 isaac_direct_velocity_termination_pitch_threshold: 0.4
 isaac_direct_velocity_termination_min_base_height: 0.0
+
+# record_video's tracking camera. 'swarm' (default): wide overview of the centroid of every
+# env's robot. 'single_env': chase-cam on one robot (isaac_video_camera_env_index), matching
+# how flash_rl/envs/genesis_envs/go2_base.py's render() always frames its single-env video.
+isaac_video_camera_mode: 'swarm'    # 'swarm' or 'single_env'
+isaac_video_camera_env_index: 0
 
 # Observation
 isaac_direct_velocity_observe_base_lin_vel: false

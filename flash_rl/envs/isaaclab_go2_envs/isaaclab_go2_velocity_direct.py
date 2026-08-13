@@ -319,6 +319,13 @@ class UnitreeGo2VelocityDirectEnvCfg(DirectRLEnvCfg):
     asset_source = GO2_ASSET_SOURCE_ISAACLAB_USD
     urdf_path = str(GO2_UNITREE_ROS_URDF_PATH)
 
+    # video_camera_mode='swarm' points the tracking camera at the centroid of every env's
+    # robot (a wide overview of the whole batch). 'single_env' instead chases one robot
+    # (video_camera_env_index) the way flash_rl/envs/genesis_envs/go2_base.py's render()
+    # always does -- see _update_tracking_camera().
+    video_camera_mode = "swarm"
+    video_camera_env_index = 0
+
     base_lin_vel_noise = (-0.1, 0.1)
     base_ang_vel_noise = (-0.2, 0.2)
     base_ang_vel_filter_alpha = None
@@ -1243,14 +1250,21 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
         self._is_yaw_in_place_env[:] = False
 
     def _update_tracking_camera(self) -> None:
-        """Point the viewport camera at the centroid of all envs' robots, tracking as they move.
+        """Point the viewport camera at the robot(s), tracking as they move.
 
-        Mirrors flash_rl/envs/genesis_envs/go2_base.py's _set_camera(), which does the same
-        thing (a floating camera tracking base_pos) for its own single-env render.
+        cfg.video_camera_mode='swarm' (default) targets the centroid of every env's robot --
+        a wide overview of the whole batch. 'single_env' instead chases one robot
+        (cfg.video_camera_env_index) with the same close chase-cam offset
+        flash_rl/envs/genesis_envs/go2_base.py's render() always uses for its single-env view.
         """
-        centroid = self._robot.data.root_pos_w.mean(dim=0)
-        target = (float(centroid[0]), float(centroid[1]), float(centroid[2]))
-        eye = (float(centroid[0]) - 3.5, float(centroid[1]) - 3.5, float(centroid[2]) + 2.2)
+        if self.cfg.video_camera_mode == "single_env":
+            pos = self._robot.data.root_pos_w[self.cfg.video_camera_env_index]
+            target = (float(pos[0]), float(pos[1]), float(pos[2]) - 0.1)
+            eye = (float(pos[0]) - 1.0, float(pos[1]) - 1.0, float(pos[2]) + 0.5)
+        else:
+            centroid = self._robot.data.root_pos_w.mean(dim=0)
+            target = (float(centroid[0]), float(centroid[1]), float(centroid[2]))
+            eye = (float(centroid[0]) - 3.5, float(centroid[1]) - 3.5, float(centroid[2]) + 2.2)
         self.sim.set_camera_view(eye, target)
 
     def render(self, recompute: bool = False):

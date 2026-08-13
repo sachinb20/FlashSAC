@@ -74,6 +74,10 @@ def build_go2_velocity_env_cfg(
     # privileged critic-only observation (off by default -- see UnitreeGo2VelocityDirectEnvCfg
     # .privileged_base_lin_vel). Only meaningful together with agent.asymmetric_observation=true.
     isaac_direct_velocity_privileged_base_lin_vel: bool = False,
+    # record_video's tracking camera: 'swarm' (default) is a wide overview of every env's
+    # robot; 'single_env' chases one robot like genesis_envs/go2_base.py's render() does.
+    isaac_video_camera_mode: str = "swarm",
+    isaac_video_camera_env_index: int = 0,
     # velocity commands
     isaac_velocity_command_resampling_time_range: tuple[float, float] = (5.0, 7.0),
     isaac_velocity_command_lin_vel_x_range: tuple[float, float] = (-1.0, 1.0),
@@ -161,6 +165,11 @@ def build_go2_velocity_env_cfg(
     env_cfg.enable_observation_noise = not bool(isaac_disable_obs_noise)
     env_cfg.randomize_episode_lengths = bool(isaac_randomize_episode_lengths)
     env_cfg.privileged_base_lin_vel = bool(isaac_direct_velocity_privileged_base_lin_vel)
+
+    if isaac_video_camera_mode not in ("swarm", "single_env"):
+        raise ValueError(f"isaac_video_camera_mode must be 'swarm' or 'single_env', got {isaac_video_camera_mode!r}")
+    env_cfg.video_camera_mode = str(isaac_video_camera_mode)
+    env_cfg.video_camera_env_index = int(isaac_video_camera_env_index)
 
     env_cfg.command_resampling_time_range = tuple(float(v) for v in isaac_velocity_command_resampling_time_range)
     env_cfg.lin_vel_x_range = tuple(float(v) for v in isaac_velocity_command_lin_vel_x_range)
