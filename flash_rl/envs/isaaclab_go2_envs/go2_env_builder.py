@@ -1,0 +1,223 @@
+"""Build a UnitreeGo2VelocityDirectEnvCfg from FlashSAC's `env.isaac_*` config keys.
+
+Mirrors TDMPC2_isaaclab/tdmpc2/envs/isaaclab.py's `_make_velocity_direct_env` field-by-field
+(same isaac_* flag names, same defaults from TDMPC2's config.yaml), minus the flags that have
+no home in the trimmed env cfg: TDMPC2's reward-scale flags (isaac_direct_velocity_*_reward_scale
+for swing_clearance/foot_lift/trot/hip_ab_ad/support_plane/standing_default_pose/bad_contact/
+low_base_height), action_rate_mode/reference_scale, bad_orientation_terminal_reward, reward_mode,
+eval-command-sweep, and AMP/SMP knobs -- none of those apply to FlashSAC's own reward
+(go2_flashsac_rewards.py) or agent-side (TD-MPC2 planner) concerns.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from .go2_action_decoder import (
+    ACTION_DECODER_SCALAR,
+    RANDOM_ACTION_CENTER_ZERO,
+    validate_action_decoder_mode,
+    validate_random_action_center,
+)
+from .go2_terrain_cfg import (
+    GO2_HEIGHT_SCAN_DEFAULT_CLIP,
+    GO2_HEIGHT_SCAN_DEFAULT_REFERENCE_OFFSET,
+    GO2_HEIGHT_SCAN_DEFAULT_RESOLUTION,
+    GO2_HEIGHT_SCAN_DEFAULT_SIZE,
+    GO2_HEIGHT_SCAN_DEFAULT_VERTICAL_OFFSET,
+    GO2_TERRAIN_CURRICULUM_MODE_DISTANCE,
+    GO2_TERRAIN_MODE_FLAT,
+)
+from .go2_urdf_asset import GO2_ASSET_SOURCE_ISAACLAB_USD, GO2_UNITREE_ROS_URDF_PATH, validate_go2_asset_source
+from .isaaclab_go2_velocity_direct import (
+    GO2_ACTUATOR_MODE_DC_MOTOR,
+    UnitreeGo2VelocityDirectEnvCfg,
+    _make_go2_robot_cfg,
+    _validate_go2_actuator_model,
+)
+
+
+def build_go2_velocity_env_cfg(
+    *,
+    num_envs: int,
+    device: str = "cuda:0",
+    seed: int = 0,
+    # actuator / asset -- isaac_go2_actuator_model=unitree_go2hv, isaac_go2_asset_source=unitree_urdf
+    isaac_go2_actuator_model: str = GO2_ACTUATOR_MODE_DC_MOTOR,
+    isaac_go2_asset_source: str = GO2_ASSET_SOURCE_ISAACLAB_USD,
+    isaac_go2_urdf_path: str | None = None,
+    # action pipeline
+    isaac_action_scale: float = 0.85,
+    isaac_direct_velocity_action_decoder: str = ACTION_DECODER_SCALAR,
+    isaac_direct_velocity_clip_joint_targets: bool = True,
+    isaac_direct_velocity_use_neutral_action: bool = False,
+    isaac_random_action_center: str = RANDOM_ACTION_CENTER_ZERO,
+    # termination
+    isaac_direct_velocity_enable_termination: bool = True,
+    isaac_direct_velocity_bad_orientation_termination_enabled: bool = False,
+    isaac_direct_velocity_bad_orientation_body_up_threshold: float = 0.25,
+    isaac_direct_velocity_bad_orientation_hysteresis_steps: int = 3,
+    # genesis-parity termination -- matches go2_base.py's check_termination() exactly
+    # (|roll|/|pitch| Euler-angle thresholds + a base-height floor), independent of the
+    # bad_orientation_* projected-gravity check above.
+    isaac_direct_velocity_genesis_style_termination_enabled: bool = False,
+    isaac_direct_velocity_termination_roll_threshold: float = 0.4,
+    isaac_direct_velocity_termination_pitch_threshold: float = 0.4,
+    isaac_direct_velocity_termination_min_base_height: float = 0.0,
+    # observation
+    isaac_direct_velocity_observe_base_lin_vel: bool = False,
+    isaac_direct_velocity_observation_history_enabled: bool = True,
+    isaac_direct_velocity_observation_history_length: int = 4,
+    isaac_direct_velocity_base_ang_vel_filter_alpha: float | None = None,
+    isaac_disable_obs_noise: bool = False,
+    isaac_randomize_episode_lengths: bool = False,
+    # privileged critic-only observation (off by default -- see UnitreeGo2VelocityDirectEnvCfg
+    # .privileged_base_lin_vel). Only meaningful together with agent.asymmetric_observation=true.
+    isaac_direct_velocity_privileged_base_lin_vel: bool = False,
+    # velocity commands
+    isaac_velocity_command_resampling_time_range: tuple[float, float] = (5.0, 7.0),
+    isaac_velocity_command_lin_vel_x_range: tuple[float, float] = (-1.0, 1.0),
+    isaac_velocity_command_lin_vel_y_range: tuple[float, float] = (-0.5, 0.5),
+    isaac_velocity_command_ang_vel_z_range: tuple[float, float] = (-1.0, 1.0),
+    isaac_velocity_command_yaw_in_place_ang_vel_z_range: tuple[float, float] = (-0.7, 0.7),
+    isaac_velocity_command_heading_range: tuple[float, float] = (-3.141592653589793, 3.141592653589793),
+    isaac_velocity_command_heading_enabled: bool = True,
+    isaac_velocity_command_heading_control_stiffness: float = 1.0,
+    isaac_velocity_command_rel_standing_envs: float = 0.06,
+    isaac_velocity_command_rel_heading_envs: float = 1.0,
+    isaac_velocity_command_rel_yaw_in_place_envs: float = 0.0,
+    # domain randomization
+    isaac_dr_enabled: bool = False,
+    isaac_dr_train_only: bool = True,
+    isaac_dr_static_friction_range: tuple[float, float] = (0.2, 1.25),
+    isaac_dr_dynamic_friction_range: tuple[float, float] = (0.2, 1.25),
+    isaac_dr_restitution_range: tuple[float, float] = (0.0, 0.15),
+    isaac_dr_base_mass_add_range: tuple[float, float] = (-1.0, 3.0),
+    isaac_dr_base_com_range_x: tuple[float, float] = (-0.15, 0.15),
+    isaac_dr_base_com_range_y: tuple[float, float] = (-0.10, 0.10),
+    isaac_dr_base_com_range_z: tuple[float, float] = (-0.05, 0.08),
+    isaac_dr_motor_strength_range: tuple[float, float] = (0.9, 1.1),
+    isaac_dr_motor_strength_per_joint: bool = True,
+    # terrain (flat + rough)
+    isaac_direct_velocity_terrain_mode: str = GO2_TERRAIN_MODE_FLAT,
+    isaac_direct_velocity_terrain_preset: str | None = None,
+    isaac_direct_velocity_terrain_curriculum_enabled: bool = True,
+    isaac_direct_velocity_terrain_curriculum_mode: str = GO2_TERRAIN_CURRICULUM_MODE_DISTANCE,
+    isaac_direct_velocity_terrain_stationary_xy_command_threshold: float = 0.1,
+    isaac_direct_velocity_terrain_max_init_level: int = 5,
+    isaac_direct_velocity_terrain_num_rows: int = 10,
+    isaac_direct_velocity_terrain_num_cols: int = 20,
+    isaac_direct_velocity_terrain_debug_vis: bool = False,
+    # height scan (disabled by default, matches TDMPC2 config.yaml)
+    isaac_direct_velocity_height_scan_enabled: bool = False,
+    isaac_direct_velocity_height_scan_observe: bool = True,
+    isaac_direct_velocity_height_scan_size: tuple[float, float] = GO2_HEIGHT_SCAN_DEFAULT_SIZE,
+    isaac_direct_velocity_height_scan_resolution: float = GO2_HEIGHT_SCAN_DEFAULT_RESOLUTION,
+    isaac_direct_velocity_height_scan_vertical_offset: float = GO2_HEIGHT_SCAN_DEFAULT_VERTICAL_OFFSET,
+    isaac_direct_velocity_height_scan_reference_offset: float = GO2_HEIGHT_SCAN_DEFAULT_REFERENCE_OFFSET,
+    isaac_direct_velocity_height_scan_clip: tuple[float, float] = GO2_HEIGHT_SCAN_DEFAULT_CLIP,
+    # sim / physx timing overrides (None = inert, matches TDMPC2 config.yaml defaults)
+    isaac_direct_velocity_sim_dt: float | None = None,
+    isaac_direct_velocity_decimation: int | None = None,
+    isaac_physx_enable_external_forces_every_iteration: bool | None = None,
+    isaac_physx_min_velocity_iteration_count: int | None = None,
+    **_ignored: Any,
+) -> UnitreeGo2VelocityDirectEnvCfg:
+    env_cfg = UnitreeGo2VelocityDirectEnvCfg()
+
+    actuator_model = _validate_go2_actuator_model(isaac_go2_actuator_model)
+    asset_source = validate_go2_asset_source(isaac_go2_asset_source)
+    urdf_path = str(isaac_go2_urdf_path) if isaac_go2_urdf_path else str(env_cfg.urdf_path or GO2_UNITREE_ROS_URDF_PATH)
+    env_cfg.actuator_model = actuator_model
+    env_cfg.asset_source = asset_source
+    env_cfg.urdf_path = urdf_path
+    # The robot cfg is built once at dataclass-definition time with the default actuator/asset;
+    # rebuild it now that the actual actuator_model/asset_source/urdf_path are known.
+    env_cfg.robot = _make_go2_robot_cfg(actuator_model, asset_source, urdf_path)
+
+    env_cfg.seed = int(seed)
+    env_cfg.scene.num_envs = int(num_envs)
+    env_cfg.sim.device = str(device)
+
+    env_cfg.action_scale = float(isaac_action_scale)
+    env_cfg.action_decoder = validate_action_decoder_mode(isaac_direct_velocity_action_decoder)
+    env_cfg.clip_joint_targets = bool(isaac_direct_velocity_clip_joint_targets)
+    env_cfg.use_neutral_action = bool(isaac_direct_velocity_use_neutral_action)
+    env_cfg.random_action_center = validate_random_action_center(isaac_random_action_center)
+
+    env_cfg.enable_termination = bool(isaac_direct_velocity_enable_termination)
+    env_cfg.bad_orientation_termination_enabled = bool(isaac_direct_velocity_bad_orientation_termination_enabled)
+    env_cfg.bad_orientation_body_up_threshold = float(isaac_direct_velocity_bad_orientation_body_up_threshold)
+    env_cfg.bad_orientation_hysteresis_steps = int(isaac_direct_velocity_bad_orientation_hysteresis_steps)
+    env_cfg.genesis_style_termination_enabled = bool(isaac_direct_velocity_genesis_style_termination_enabled)
+    env_cfg.termination_roll_threshold = float(isaac_direct_velocity_termination_roll_threshold)
+    env_cfg.termination_pitch_threshold = float(isaac_direct_velocity_termination_pitch_threshold)
+    env_cfg.termination_min_base_height = float(isaac_direct_velocity_termination_min_base_height)
+
+    env_cfg.observe_base_lin_vel = bool(isaac_direct_velocity_observe_base_lin_vel)
+    env_cfg.observation_history_enabled = bool(isaac_direct_velocity_observation_history_enabled)
+    env_cfg.observation_history_length = int(isaac_direct_velocity_observation_history_length)
+    env_cfg.base_ang_vel_filter_alpha = isaac_direct_velocity_base_ang_vel_filter_alpha
+    env_cfg.enable_observation_noise = not bool(isaac_disable_obs_noise)
+    env_cfg.randomize_episode_lengths = bool(isaac_randomize_episode_lengths)
+    env_cfg.privileged_base_lin_vel = bool(isaac_direct_velocity_privileged_base_lin_vel)
+
+    env_cfg.command_resampling_time_range = tuple(float(v) for v in isaac_velocity_command_resampling_time_range)
+    env_cfg.lin_vel_x_range = tuple(float(v) for v in isaac_velocity_command_lin_vel_x_range)
+    env_cfg.lin_vel_y_range = tuple(float(v) for v in isaac_velocity_command_lin_vel_y_range)
+    env_cfg.ang_vel_z_range = tuple(float(v) for v in isaac_velocity_command_ang_vel_z_range)
+    env_cfg.yaw_in_place_ang_vel_z_range = tuple(float(v) for v in isaac_velocity_command_yaw_in_place_ang_vel_z_range)
+    env_cfg.heading_range = tuple(float(v) for v in isaac_velocity_command_heading_range)
+    env_cfg.heading_command = bool(isaac_velocity_command_heading_enabled)
+    env_cfg.heading_control_stiffness = float(isaac_velocity_command_heading_control_stiffness)
+    env_cfg.rel_standing_envs = float(isaac_velocity_command_rel_standing_envs)
+    env_cfg.rel_heading_envs = float(isaac_velocity_command_rel_heading_envs)
+    env_cfg.rel_yaw_in_place_envs = float(isaac_velocity_command_rel_yaw_in_place_envs)
+
+    env_cfg.domain_randomization_enabled = bool(isaac_dr_enabled)
+    env_cfg.domain_randomization_train_only = bool(isaac_dr_train_only)
+    env_cfg.dr_static_friction_range = tuple(float(v) for v in isaac_dr_static_friction_range)
+    env_cfg.dr_dynamic_friction_range = tuple(float(v) for v in isaac_dr_dynamic_friction_range)
+    env_cfg.dr_restitution_range = tuple(float(v) for v in isaac_dr_restitution_range)
+    env_cfg.dr_base_mass_add_range = tuple(float(v) for v in isaac_dr_base_mass_add_range)
+    env_cfg.dr_base_com_range_x = tuple(float(v) for v in isaac_dr_base_com_range_x)
+    env_cfg.dr_base_com_range_y = tuple(float(v) for v in isaac_dr_base_com_range_y)
+    env_cfg.dr_base_com_range_z = tuple(float(v) for v in isaac_dr_base_com_range_z)
+    env_cfg.dr_motor_strength_range = tuple(float(v) for v in isaac_dr_motor_strength_range)
+    env_cfg.dr_motor_strength_per_joint = bool(isaac_dr_motor_strength_per_joint)
+
+    env_cfg.terrain_mode = str(isaac_direct_velocity_terrain_mode)
+    if isaac_direct_velocity_terrain_preset is not None:
+        env_cfg.terrain_preset = str(isaac_direct_velocity_terrain_preset)
+    env_cfg.terrain_curriculum_enabled = bool(isaac_direct_velocity_terrain_curriculum_enabled)
+    env_cfg.terrain_curriculum_mode = str(isaac_direct_velocity_terrain_curriculum_mode)
+    env_cfg.terrain_stationary_xy_command_threshold = float(
+        isaac_direct_velocity_terrain_stationary_xy_command_threshold
+    )
+    env_cfg.terrain_max_init_level = int(isaac_direct_velocity_terrain_max_init_level)
+    env_cfg.terrain_num_rows = int(isaac_direct_velocity_terrain_num_rows)
+    env_cfg.terrain_num_cols = int(isaac_direct_velocity_terrain_num_cols)
+    env_cfg.terrain_debug_vis = bool(isaac_direct_velocity_terrain_debug_vis)
+
+    env_cfg.height_scan_enabled = bool(isaac_direct_velocity_height_scan_enabled)
+    env_cfg.height_scan_observe = bool(isaac_direct_velocity_height_scan_observe)
+    env_cfg.height_scan_size = tuple(float(v) for v in isaac_direct_velocity_height_scan_size)
+    env_cfg.height_scan_resolution = float(isaac_direct_velocity_height_scan_resolution)
+    env_cfg.height_scan_vertical_offset = float(isaac_direct_velocity_height_scan_vertical_offset)
+    env_cfg.height_scan_reference_offset = float(isaac_direct_velocity_height_scan_reference_offset)
+    env_cfg.height_scan_clip = tuple(float(v) for v in isaac_direct_velocity_height_scan_clip)
+
+    if isaac_direct_velocity_sim_dt is not None:
+        env_cfg.sim.dt = float(isaac_direct_velocity_sim_dt)
+    if isaac_direct_velocity_decimation is not None:
+        env_cfg.decimation = int(isaac_direct_velocity_decimation)
+        env_cfg.sim.render_interval = env_cfg.decimation
+        env_cfg.contact_sensor.update_period = env_cfg.sim.dt
+    if isaac_physx_enable_external_forces_every_iteration is not None:
+        env_cfg.sim.physx.enable_external_forces_every_iteration = bool(
+            isaac_physx_enable_external_forces_every_iteration
+        )
+    if isaac_physx_min_velocity_iteration_count is not None:
+        env_cfg.sim.physx.min_velocity_iteration_count = int(isaac_physx_min_velocity_iteration_count)
+
+    return env_cfg

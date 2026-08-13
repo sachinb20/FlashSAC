@@ -46,9 +46,9 @@ class GenesisVectorEnv(VectorEnv[NDArray, NDArray, NDArray]):
         assert "num_obs" in self.envs.obs_cfg, "num_obs must be defined in obs_cfg."
         assert "num_priv_obs" in self.envs.obs_cfg, "num_priv_obs must be defined in obs_cfg (can be None)."
         if "num_history_obs" in self.envs.obs_cfg:
-            assert (
-                self.envs.obs_cfg["num_history_obs"] == 1
-            ), "num_history_obs in obs_cfg is assumed unused in this version."
+            assert self.envs.obs_cfg["num_history_obs"] == 1, (
+                "num_history_obs in obs_cfg is assumed unused in this version."
+            )
         if self.envs.obs_cfg["num_priv_obs"] is not None:
             self.asymmetric_obs = True
             self.obs_size = self.envs.obs_cfg["num_obs"]
@@ -183,11 +183,13 @@ def make_genesis_env(
     num_envs: int,
     rescale_action: bool,
     eval_mode: bool,
+    show_viewer: bool = False,
 ) -> VectorEnv[NDArray, NDArray, NDArray]:
     env = get_genesis_env(
         env_name=env_name,
         num_envs=num_envs,
         eval_mode=eval_mode,
+        show_viewer=show_viewer,
     )
     env = GenesisVectorEnv(
         env,

@@ -5,11 +5,12 @@ def get_genesis_env(
     env_name: str,
     num_envs: int,
     eval_mode: bool,
+    show_viewer: bool = False,
 ) -> Any:
     if env_name == "go2-walk":
         from .go2_walk import get_env
 
-        env = get_env(num_envs, eval_mode)
+        env = get_env(num_envs, eval_mode, show_viewer=show_viewer)
 
     elif env_name == "go2-backflip":
         from .go2_backflip import get_env

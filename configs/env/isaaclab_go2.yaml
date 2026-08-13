@@ -1,0 +1,108 @@
+##################################################################################
+# IsaacLab Go2 (direct velocity, ported sim/robot/actuator from TDMPC2_isaaclab)
+##################################################################################
+
+env_type: 'isaaclab_go2'
+env_name: 'go2-vel-direct'
+num_env_steps: ${num_env_steps}
+
+seed: ${seed}
+num_train_envs: ${num_train_envs}
+num_eval_envs: ${num_eval_envs}
+num_record_envs: ${num_record_envs}
+rescale_action: null    # the env's action decoder scales internally; must stay null
+max_episode_steps: null
+
+# App / sim launch
+headless: true
+enable_cameras: false
+device: 'cuda:0'
+
+# Actuator / asset -- isaac_go2_actuator_model=unitree_go2hv, isaac_go2_asset_source=unitree_urdf
+isaac_go2_actuator_model: 'dc_motor'          # 'dc_motor' or 'unitree_go2hv'
+isaac_go2_asset_source: 'isaaclab_usd'        # 'isaaclab_usd' or 'unitree_urdf'
+isaac_go2_urdf_path: null                     # null -> assets/go2_description/urdf/go2_description.urdf
+
+# Action pipeline
+isaac_action_scale: 0.85
+isaac_direct_velocity_action_decoder: 'scalar'
+isaac_direct_velocity_clip_joint_targets: true
+isaac_direct_velocity_use_neutral_action: false
+isaac_random_action_center: 'zero'
+
+# Termination
+isaac_direct_velocity_enable_termination: true
+isaac_direct_velocity_bad_orientation_termination_enabled: false
+isaac_direct_velocity_bad_orientation_body_up_threshold: 0.25
+isaac_direct_velocity_bad_orientation_hysteresis_steps: 3
+# Genesis-parity termination: |roll|/|pitch| Euler-angle thresholds (radians) + a base-height
+# floor, matching flash_rl/envs/genesis_envs/go2_base.py's check_termination() exactly.
+# Independent of the bad_orientation_* projected-gravity check above.
+isaac_direct_velocity_genesis_style_termination_enabled: false
+isaac_direct_velocity_termination_roll_threshold: 0.4
+isaac_direct_velocity_termination_pitch_threshold: 0.4
+isaac_direct_velocity_termination_min_base_height: 0.0
+
+# Observation
+isaac_direct_velocity_observe_base_lin_vel: false
+isaac_direct_velocity_observation_history_enabled: true
+isaac_direct_velocity_observation_history_length: 4
+isaac_direct_velocity_base_ang_vel_filter_alpha: null
+isaac_disable_obs_noise: false
+isaac_randomize_episode_lengths: false
+# Adds true (unnoised) base_lin_vel_b as a critic-only tail (225 -> 228). Only meaningful
+# together with agent.asymmetric_observation=true -- see UnitreeGo2VelocityDirectEnvCfg
+# .privileged_base_lin_vel.
+isaac_direct_velocity_privileged_base_lin_vel: false
+
+# Velocity commands
+isaac_velocity_command_resampling_time_range: [5.0, 7.0]
+isaac_velocity_command_lin_vel_x_range: [-1.0, 1.0]
+isaac_velocity_command_lin_vel_y_range: [-0.5, 0.5]
+isaac_velocity_command_ang_vel_z_range: [-1.0, 1.0]
+isaac_velocity_command_yaw_in_place_ang_vel_z_range: [-0.7, 0.7]
+isaac_velocity_command_heading_range: [-3.141592653589793, 3.141592653589793]
+isaac_velocity_command_heading_enabled: true
+isaac_velocity_command_heading_control_stiffness: 1.0
+isaac_velocity_command_rel_standing_envs: 0.06
+isaac_velocity_command_rel_heading_envs: 1.0
+isaac_velocity_command_rel_yaw_in_place_envs: 0.0
+
+# Domain randomization
+isaac_dr_enabled: false
+isaac_dr_train_only: true
+isaac_dr_static_friction_range: [0.2, 1.25]
+isaac_dr_dynamic_friction_range: [0.2, 1.25]
+isaac_dr_restitution_range: [0.0, 0.15]
+isaac_dr_base_mass_add_range: [-1.0, 3.0]
+isaac_dr_base_com_range_x: [-0.15, 0.15]
+isaac_dr_base_com_range_y: [-0.10, 0.10]
+isaac_dr_base_com_range_z: [-0.05, 0.08]
+isaac_dr_motor_strength_range: [0.9, 1.1]
+isaac_dr_motor_strength_per_joint: true
+
+# Terrain (flat + rough)
+isaac_direct_velocity_terrain_mode: 'flat'    # 'flat', 'rough_medium', or 'rough_hard'
+isaac_direct_velocity_terrain_preset: null    # null -> resolved from terrain_mode
+isaac_direct_velocity_terrain_curriculum_enabled: true
+isaac_direct_velocity_terrain_curriculum_mode: 'distance'
+isaac_direct_velocity_terrain_stationary_xy_command_threshold: 0.1
+isaac_direct_velocity_terrain_max_init_level: 5
+isaac_direct_velocity_terrain_num_rows: 10
+isaac_direct_velocity_terrain_num_cols: 20
+isaac_direct_velocity_terrain_debug_vis: false
+
+# Height scan (disabled by default)
+isaac_direct_velocity_height_scan_enabled: false
+isaac_direct_velocity_height_scan_observe: true
+isaac_direct_velocity_height_scan_size: [1.6, 1.0]
+isaac_direct_velocity_height_scan_resolution: 0.1
+isaac_direct_velocity_height_scan_vertical_offset: 20.0
+isaac_direct_velocity_height_scan_reference_offset: 0.5
+isaac_direct_velocity_height_scan_clip: [-1.0, 1.0]
+
+# Sim / physx timing overrides (null = inert, matches TDMPC2 config.yaml defaults)
+isaac_direct_velocity_sim_dt: null
+isaac_direct_velocity_decimation: null
+isaac_physx_enable_external_forces_every_iteration: null
+isaac_physx_min_velocity_iteration_count: null

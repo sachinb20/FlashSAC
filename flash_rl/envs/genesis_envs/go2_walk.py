@@ -235,6 +235,7 @@ def get_cfgs():
 def get_env(
     num_envs: int,
     eval_mode: bool,
+    show_viewer: bool = False,
 ) -> Go2WalkEnv:
     try:
         gs.init(logging_level="warning")
@@ -247,7 +248,7 @@ def get_env(
         obs_cfg=obs_cfg,
         reward_cfg=reward_cfg,
         command_cfg=command_cfg,
-        show_viewer=False,
+        show_viewer=show_viewer,
         eval=eval_mode,
         debug=False,
     )

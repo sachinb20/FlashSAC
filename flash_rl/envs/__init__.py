@@ -158,6 +158,24 @@ def create_envs(
         eval_env = train_env
         record_env = train_env
 
+    elif env_type == "isaaclab_go2":
+        from flash_rl.envs.isaaclab_go2 import make_isaaclab_go2_env
+
+        assert rescale_action is None, "Unused hyperparameter in IsaacLab Go2 (the action decoder scales internally)."
+        assert num_eval_envs is None, "Unused hyperparameter in IsaacLab Go2."
+        assert num_record_envs is None, "Unused hyperparameter in IsaacLab Go2."
+        train_env = make_isaaclab_go2_env(
+            env_name=env_name,
+            num_envs=num_train_envs,
+            seed=seed,
+            eval_mode=False,
+            **kwargs,
+        )
+        # IsaacLab/IsaacSim only supports one SimulationApp instance per process by design,
+        # same constraint as env_type == "isaaclab" above.
+        eval_env = train_env
+        record_env = train_env
+
     else:
         raise NotImplementedError
 

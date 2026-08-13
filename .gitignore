@@ -162,3 +162,12 @@ tmp/**
 
 # saved checkpoints
 models/**
+
+# tensorboard logs
+runs/**
+
+# recorded eval/demo videos
+videos/**
+
+# external reference repo used for porting -- not a FlashSAC dependency, kept out of the repo
+TDMPC2_isaaclab/
