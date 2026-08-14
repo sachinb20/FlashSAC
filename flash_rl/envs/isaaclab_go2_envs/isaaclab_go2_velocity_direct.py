@@ -42,8 +42,13 @@ from .go2_action_decoder import (
     validate_random_action_center,
 )
 from .go2_base_ang_vel_filter import base_ang_vel_with_optional_ema, reset_base_ang_vel_ema_state
-from .go2_command_sampling import sample_go2_velocity_commands
+from .go2_command_sampling import apply_go2_command_deadband, sample_go2_velocity_commands
 from .go2_flashsac_rewards import go2_flashsac_reward_scales, go2_flashsac_reward_terms, go2_flashsac_scalar_reward
+from .go2_motor_offset_randomization import (
+    clear_motor_offsets,
+    motor_offset_range_is_default,
+    sample_motor_offsets,
+)
 from .go2_motor_strength_randomization import (
     as_actuator_tensor,
     motor_strength_range_is_default,
@@ -108,6 +113,19 @@ PYMPC_GO2_NOMINAL_JOINT_POS = {
     ".*_hip_joint": 0.0,
     ".*_thigh_joint": 0.9,
     ".*_calf_joint": -1.8,
+}
+
+# genesis_envs/go2_walk.py's default_joint_angles + base_init_pos. Note the front/rear thigh
+# split (0.8 vs 1.0): genesis stands rear-loaded and nose-down, whereas the PyMPC stance above
+# is fore/aft symmetric at 0.9. Because the decoder is
+# `target = default_joint_pos + action_scale * action`, this pose is the policy's operating
+# point, so the difference biases forward vs backward locomotion, not just posture.
+GENESIS_GO2_NOMINAL_BASE_Z = 0.42
+GENESIS_GO2_NOMINAL_JOINT_POS = {
+    ".*_hip_joint": 0.0,
+    "F[L,R]_thigh_joint": 0.8,
+    "R[L,R]_thigh_joint": 1.0,
+    ".*_calf_joint": -1.5,
 }
 
 
@@ -268,13 +286,16 @@ def _make_go2_robot_cfg(
     urdf_path: str | None = None,
     pd_stiffness: float | None = None,
     pd_damping: float | None = None,
+    genesis_style_nominal_pose: bool = False,
 ):
     actuator_model = _validate_go2_actuator_model(actuator_model)
     asset_source = validate_go2_asset_source(asset_source)
     robot_cfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    nominal_base_z = GENESIS_GO2_NOMINAL_BASE_Z if genesis_style_nominal_pose else PYMPC_GO2_NOMINAL_BASE_Z
+    nominal_joint_pos = GENESIS_GO2_NOMINAL_JOINT_POS if genesis_style_nominal_pose else PYMPC_GO2_NOMINAL_JOINT_POS
     robot_cfg.init_state = ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, PYMPC_GO2_NOMINAL_BASE_Z),
-        joint_pos=dict(PYMPC_GO2_NOMINAL_JOINT_POS),
+        pos=(0.0, 0.0, nominal_base_z),
+        joint_pos=dict(nominal_joint_pos),
         joint_vel={".*": 0.0},
     )
     if asset_source == GO2_ASSET_SOURCE_UNITREE_URDF:
@@ -413,6 +434,10 @@ class UnitreeGo2VelocityDirectEnvCfg(DirectRLEnvCfg):
     # is the default -- the port's own DR surface randomizes motor_strength instead.
     dr_kp_scale_range = (1.0, 1.0)
     dr_kd_scale_range = (1.0, 1.0)
+    # Per-(env, joint) joint-position bias in radians, held for the episode -- genesis's
+    # motor_offset_range ([-0.02, 0.02] there). (0.0, 0.0) disables it. genesis randomizes this
+    # INSTEAD of motor strength (its randomize_motor_strength is False).
+    dr_motor_offset_range = (0.0, 0.0)
     actuator_model = GO2_ACTUATOR_MODE_DC_MOTOR
     asset_source = GO2_ASSET_SOURCE_ISAACLAB_USD
     urdf_path = str(GO2_UNITREE_ROS_URDF_PATH)
@@ -420,6 +445,20 @@ class UnitreeGo2VelocityDirectEnvCfg(DirectRLEnvCfg):
     # go2-walk uses Kp=30, Kd=1.5 -- see _make_go2_robot_cfg.
     pd_stiffness = None
     pd_damping = None
+    # Swap the PyMPC nominal stance for genesis's (front thigh 0.8 / rear thigh 1.0, calf -1.5,
+    # spawn z 0.42). See GENESIS_GO2_NOMINAL_JOINT_POS for why this is fore/aft relevant.
+    genesis_style_nominal_pose = False
+    # Reset-state randomization, matching genesis_envs/go2_base.py's reset_idx:
+    #   dof_pos  = default + U(-0.3, 0.3)      (ADDITIVE -- IsaacLab's stock Go2 event instead
+    #                                           scales the default by U(1.0, 1.0), i.e. none)
+    #   base xy += U(-1.0, 1.0), roll/pitch = U(-0.1, 0.1), yaw = U(0.0, 3.14)
+    # genesis_style_reset_enabled swaps all of the above in at once; leave it off to keep the
+    # port's own reset (no joint noise, base xy +/-0.5, yaw +/-pi, level).
+    genesis_style_reset_enabled = False
+    # Zero a freshly sampled command whose magnitude is under the threshold; genesis uses 0.2
+    # on both. 0.0 disables. See apply_go2_command_deadband.
+    command_deadband_lin_vel = 0.0
+    command_deadband_ang_vel = 0.0
 
     # video_camera_mode='swarm' points the tracking camera at the centroid of every env's
     # robot (a wide overview of the whole batch). 'single_env' instead chases one robot
@@ -613,6 +652,38 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
             )
         cfg.yaw_in_place_ang_vel_z_range = (yaw_low, yaw_high)
 
+        if bool(cfg.genesis_style_reset_enabled):
+            # genesis_envs/go2_base.py reset_idx: joints are offset ADDITIVELY off the default
+            # (reset_joints_by_scale, the port's stock event, multiplies instead -- and its
+            # (1.0, 1.0) range means no randomization at all), and the base gets a wider xy
+            # spread plus a small roll/pitch tilt that the port's level reset never applies.
+            cfg.events.reset_robot_joints = EventTerm(
+                func=mdp.reset_joints_by_offset,
+                mode="reset",
+                params={"position_range": (-0.3, 0.3), "velocity_range": (0.0, 0.0)},
+            )
+            cfg.events.reset_base = EventTerm(
+                func=mdp.reset_root_state_uniform,
+                mode="reset",
+                params={
+                    "pose_range": {
+                        "x": (-1.0, 1.0),
+                        "y": (-1.0, 1.0),
+                        "roll": (-0.1, 0.1),
+                        "pitch": (-0.1, 0.1),
+                        "yaw": (0.0, 3.14),
+                    },
+                    "velocity_range": {
+                        "x": (0.0, 0.0),
+                        "y": (0.0, 0.0),
+                        "z": (0.0, 0.0),
+                        "roll": (0.0, 0.0),
+                        "pitch": (0.0, 0.0),
+                        "yaw": (0.0, 0.0),
+                    },
+                },
+            )
+
         cfg.action_latency_steps = int(cfg.action_latency_steps)
         if cfg.action_latency_steps not in (0, 1):
             raise ValueError(
@@ -664,6 +735,10 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
         self._previous_processed_actions = self._processed_actions.clone()
         self.actions = self._actions
         self._set_action_buffers_to_reset(torch.arange(self.num_envs, dtype=torch.long, device=self.device))
+
+        # Sim-order joint-position bias added to every target in _apply_action. Allocated here
+        # (not in the DR block) because _apply_action reads it even with DR disabled.
+        self._motor_offsets = torch.zeros_like(self._robot.data.default_joint_pos)
 
         self._commands = torch.zeros(self.num_envs, 3, device=self.device)
         # Mirrors genesis's commands_scale = [lin_vel, lin_vel, ang_vel]; a (3,) row vector so
@@ -892,7 +967,10 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
         self.actions = self._actions
 
     def _apply_action(self):
-        self._robot.set_joint_position_target(self._processed_actions)
+        # The offset is added here rather than in _pre_physics_step so it also biases the
+        # targets written by _set_action_buffers_to_reset, matching genesis -- where the offset
+        # sits inside _compute_torques and therefore affects every torque the episode computes.
+        self._robot.set_joint_position_target(self._processed_actions + self._motor_offsets)
 
     def _get_observations(self) -> dict:
         return self.compute_policy_observations(update_history=True)
@@ -1274,8 +1352,15 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
             rel_yaw_in_place_envs=float(self.cfg.rel_yaw_in_place_envs),
             rel_heading_envs=float(self.cfg.rel_heading_envs),
         )
+        # Applied after mode selection so a standing/yaw-in-place env keeps its zeroed axes;
+        # genesis has no such modes and applies the deadband straight to the fresh sample.
+        sampled_commands = apply_go2_command_deadband(
+            sample["commands"],
+            float(self.cfg.command_deadband_lin_vel),
+            float(self.cfg.command_deadband_ang_vel),
+        )
         self._command_time_left[env_ids] = sample["command_time_left"]
-        self._commands[env_ids] = sample["commands"]
+        self._commands[env_ids] = sampled_commands
         self._heading_targets[env_ids] = sample["heading_targets"]
         self._is_standing_env[env_ids] = sample["is_standing"]
         self._is_yaw_in_place_env[env_ids] = sample["is_yaw_in_place"]
@@ -1321,6 +1406,7 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
         self._randomize_friction(env_ids_cpu)
         self._randomize_motor_strength(env_ids)
         self._randomize_pd_gains(env_ids)
+        self._randomize_motor_offsets(env_ids)
 
     def _restore_domain_randomization_defaults(self, env_ids: torch.Tensor) -> None:
         env_ids_cpu = env_ids.detach().cpu()
@@ -1343,6 +1429,7 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
             refresh_velocity_limit=self._refresh_dc_motor_velocity_limit,
         )
         restore_pd_gain_defaults(self._robot.actuators, self._dr_default_actuator_state, env_ids)
+        clear_motor_offsets(self._motor_offsets, env_ids)
 
     def _randomize_base_mass(self, env_ids_cpu: torch.Tensor) -> None:
         body_ids = torch.as_tensor(self._base_body_ids, dtype=torch.long)
@@ -1402,6 +1489,13 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
             refresh_velocity_limit=self._refresh_dc_motor_velocity_limit,
             require_motor_strength=not motor_strength_range_is_default(tuple(self.cfg.dr_motor_strength_range)),
         )
+
+    def _randomize_motor_offsets(self, env_ids: torch.Tensor) -> None:
+        offset_range = tuple(self.cfg.dr_motor_offset_range)
+        if motor_offset_range_is_default(offset_range):
+            clear_motor_offsets(self._motor_offsets, env_ids)
+            return
+        sample_motor_offsets(self._motor_offsets, env_ids, offset_range)
 
     def _randomize_pd_gains(self, env_ids: torch.Tensor) -> None:
         randomize_pd_gains(

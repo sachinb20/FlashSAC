@@ -37,6 +37,16 @@ isaac_go2_urdf_path: null                     # null -> assets/go2_description/u
 # torque-speed envelope, copying stiffness/damping straight off the source actuator cfg.
 isaac_go2_pd_stiffness: null
 isaac_go2_pd_damping: null
+# Nominal stance. false = TDMPC2's PyMPC pose (thigh 0.9 front AND rear, calf -1.8, spawn
+# z=0.29017). true = genesis go2-walk's pose (front thigh 0.8 / REAR thigh 1.0, calf -1.5,
+# spawn z=0.42). The front/rear thigh split is the important part: the decoder is
+# target = default_joint_pos + action_scale * action, so this pose is the policy's operating
+# point and a fore/aft-symmetric stance removes genesis's rear-loaded forward bias.
+isaac_go2_genesis_style_nominal_pose: false
+# genesis's reset_idx randomization: joints offset ADDITIVELY by U(-0.3, 0.3) rad off the
+# default (the port's stock event scales by U(1.0, 1.0) = no randomization at all), base xy
+# spread +/-1.0 with a U(-0.1, 0.1) roll/pitch tilt and U(0, pi) yaw.
+isaac_direct_velocity_genesis_style_reset_enabled: false
 
 # Action pipeline
 isaac_action_scale: 0.85
@@ -82,6 +92,9 @@ isaac_direct_velocity_privileged_base_lin_vel: false
 # privileged_base_lin_vel this reproduces genesis's 60-column privileged_obs_buf exactly
 # ([obs 45 | base_lin_vel 3 | last_actions 12]) when observation_history_enabled=false.
 isaac_direct_velocity_privileged_last_actions: false
+# Base-height reward target. null follows the nominal stance height (0.29017, or 0.3 when
+# genesis_style_nominal_pose is on); genesis's go2-walk uses a flat 0.3.
+isaac_direct_velocity_base_height_target: null
 # Applies genesis's per-channel obs_scales (lin_vel x2.0, ang_vel x0.25, dof_vel x0.05, dof_pos
 # and gravity x1.0) plus genesis's matching post-scale noise magnitudes (ang_vel 0.1, gravity
 # 0.02, dof_pos 0.01, dof_vel 0.5). The port is otherwise raw physical units, unscaled. Scales
@@ -100,6 +113,11 @@ isaac_velocity_command_heading_control_stiffness: 1.0
 isaac_velocity_command_rel_standing_envs: 0.06
 isaac_velocity_command_rel_heading_envs: 1.0
 isaac_velocity_command_rel_yaw_in_place_envs: 0.0
+# Zero a freshly sampled command whose magnitude is under the threshold. genesis uses 0.2 on
+# both, which zeroes the yaw command on ~20% of resamples and the planar command on ~3%.
+# 0.0 disables. Independent of rel_standing_envs, which zeroes all three axes together.
+isaac_velocity_command_deadband_lin_vel: 0.0
+isaac_velocity_command_deadband_ang_vel: 0.0
 
 # Domain randomization
 isaac_dr_enabled: false
@@ -118,6 +136,10 @@ isaac_dr_motor_strength_per_joint: true
 # motor_strength instead. Only applied when isaac_dr_enabled=true.
 isaac_dr_kp_scale_range: [1.0, 1.0]
 isaac_dr_kd_scale_range: [1.0, 1.0]
+# Per-(env, joint) joint-position bias in radians, held for the episode (encoder/calibration
+# error). genesis uses [-0.02, 0.02] and randomizes this INSTEAD of motor strength.
+# [0.0, 0.0] disables.
+isaac_dr_motor_offset_range: [0.0, 0.0]
 
 # Terrain (flat + rough)
 isaac_direct_velocity_terrain_mode: 'flat'    # 'flat', 'rough_medium', or 'rough_hard'

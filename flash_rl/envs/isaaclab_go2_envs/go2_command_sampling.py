@@ -7,6 +7,34 @@ def _uniform(shape: tuple[int, ...], value_range: tuple[float, float], *, device
     return torch.empty(shape, device=device).uniform_(float(value_range[0]), float(value_range[1]))
 
 
+def apply_go2_command_deadband(
+    commands: torch.Tensor,
+    lin_vel_deadband: float,
+    ang_vel_deadband: float,
+) -> torch.Tensor:
+    """Zero commands whose magnitude falls under a threshold, in place.
+
+    Mirrors genesis_envs/go2_base.py's `_resample_commands`, which drops the planar command
+    when ||(vx, vy)|| is below the threshold and the yaw command when |wz| is below it, the two
+    decided independently:
+
+        commands[:, :2] *= (norm(commands[:, :2]) > 0.2)
+        commands[:, 2]  *= (abs(commands[:, 2]) > 0.2)
+
+    With uniform commands over [-1, 1] and a 0.2 threshold this zeroes the yaw command on ~20%
+    of resamples and the planar command on ~3%, so a meaningful share of genesis's training
+    distribution is "hold still on this axis" -- distinct from a whole-env standing mode, which
+    zeroes all three axes together.
+    """
+    if float(lin_vel_deadband) > 0.0:
+        keep_lin = torch.norm(commands[:, :2], dim=1) > float(lin_vel_deadband)
+        commands[:, :2] *= keep_lin.unsqueeze(1)
+    if float(ang_vel_deadband) > 0.0:
+        keep_ang = torch.abs(commands[:, 2]) > float(ang_vel_deadband)
+        commands[:, 2] *= keep_ang
+    return commands
+
+
 def sample_go2_velocity_commands(
     count: int,
     *,

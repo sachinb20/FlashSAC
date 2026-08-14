@@ -51,6 +51,15 @@ def build_go2_velocity_env_cfg(
     # change the gains on its own -- it only swaps the torque-speed envelope.
     isaac_go2_pd_stiffness: float | None = None,
     isaac_go2_pd_damping: float | None = None,
+    # Use genesis's nominal stance (front thigh 0.8 / rear thigh 1.0, calf -1.5, spawn z 0.42)
+    # instead of TDMPC2's fore/aft-symmetric PyMPC stance (thigh 0.9, calf -1.8, z 0.29017).
+    isaac_go2_genesis_style_nominal_pose: bool = False,
+    # genesis's reset_idx: joints offset by U(-0.3, 0.3) rad off the default, base xy spread
+    # +/-1.0 with a U(-0.1, 0.1) roll/pitch tilt and U(0, pi) yaw.
+    isaac_direct_velocity_genesis_style_reset_enabled: bool = False,
+    # Zero a sampled command below this magnitude (genesis uses 0.2 on both). 0.0 disables.
+    isaac_velocity_command_deadband_lin_vel: float = 0.0,
+    isaac_velocity_command_deadband_ang_vel: float = 0.0,
     # action pipeline
     isaac_action_scale: float = 0.85,
     isaac_direct_velocity_action_decoder: str = ACTION_DECODER_SCALAR,
@@ -84,6 +93,8 @@ def build_go2_velocity_env_cfg(
     # Appends the previous raw action (12 cols) as a further critic-only tail. With
     # privileged_base_lin_vel this reproduces genesis's 60-col privileged_obs_buf exactly.
     isaac_direct_velocity_privileged_last_actions: bool = False,
+    # None follows the nominal stance height; genesis's go2-walk uses 0.3.
+    isaac_direct_velocity_base_height_target: float | None = None,
     # Applies genesis's obs_scales (lin_vel 2.0 / ang_vel 0.25 / dof_vel 0.05) together with
     # genesis's matching post-scale noise magnitudes. The port is otherwise raw physical units.
     isaac_direct_velocity_genesis_style_obs_scaling_enabled: bool = False,
@@ -119,6 +130,8 @@ def build_go2_velocity_env_cfg(
     # (1.0, 1.0) disables it.
     isaac_dr_kp_scale_range: tuple[float, float] = (1.0, 1.0),
     isaac_dr_kd_scale_range: tuple[float, float] = (1.0, 1.0),
+    # Per-(env, joint) joint-position bias in radians; genesis uses [-0.02, 0.02]. (0,0) off.
+    isaac_dr_motor_offset_range: tuple[float, float] = (0.0, 0.0),
     # terrain (flat + rough)
     isaac_direct_velocity_terrain_mode: str = GO2_TERRAIN_MODE_FLAT,
     isaac_direct_velocity_terrain_preset: str | None = None,
@@ -156,9 +169,24 @@ def build_go2_velocity_env_cfg(
     env_cfg.pd_damping = None if isaac_go2_pd_damping is None else float(isaac_go2_pd_damping)
     # The robot cfg is built once at dataclass-definition time with the default actuator/asset;
     # rebuild it now that the actual actuator_model/asset_source/urdf_path/PD gains are known.
+    env_cfg.genesis_style_nominal_pose = bool(isaac_go2_genesis_style_nominal_pose)
+    env_cfg.genesis_style_reset_enabled = bool(isaac_direct_velocity_genesis_style_reset_enabled)
+    env_cfg.command_deadband_lin_vel = float(isaac_velocity_command_deadband_lin_vel)
+    env_cfg.command_deadband_ang_vel = float(isaac_velocity_command_deadband_ang_vel)
     env_cfg.robot = _make_go2_robot_cfg(
-        actuator_model, asset_source, urdf_path, env_cfg.pd_stiffness, env_cfg.pd_damping
+        actuator_model,
+        asset_source,
+        urdf_path,
+        env_cfg.pd_stiffness,
+        env_cfg.pd_damping,
+        env_cfg.genesis_style_nominal_pose,
     )
+    # The base-height reward target defaults to the nominal stance height, so it follows the
+    # pose unless explicitly overridden. genesis's go2-walk uses a flat 0.3.
+    if isaac_direct_velocity_base_height_target is not None:
+        env_cfg.base_height_target = float(isaac_direct_velocity_base_height_target)
+    elif env_cfg.genesis_style_nominal_pose:
+        env_cfg.base_height_target = 0.3
 
     env_cfg.seed = int(seed)
     env_cfg.scene.num_envs = int(num_envs)
@@ -220,6 +248,7 @@ def build_go2_velocity_env_cfg(
     env_cfg.dr_motor_strength_per_joint = bool(isaac_dr_motor_strength_per_joint)
     env_cfg.dr_kp_scale_range = tuple(float(v) for v in isaac_dr_kp_scale_range)
     env_cfg.dr_kd_scale_range = tuple(float(v) for v in isaac_dr_kd_scale_range)
+    env_cfg.dr_motor_offset_range = tuple(float(v) for v in isaac_dr_motor_offset_range)
 
     env_cfg.terrain_mode = str(isaac_direct_velocity_terrain_mode)
     if isaac_direct_velocity_terrain_preset is not None:
