@@ -57,6 +57,8 @@ def build_go2_velocity_env_cfg(
     isaac_direct_velocity_clip_joint_targets: bool = True,
     isaac_direct_velocity_use_neutral_action: bool = False,
     isaac_random_action_center: str = RANDOM_ACTION_CENTER_ZERO,
+    # 1 executes the previous control step's action, matching genesis's action_latency=0.02.
+    isaac_direct_velocity_action_latency_steps: int = 0,
     # termination
     isaac_direct_velocity_enable_termination: bool = True,
     isaac_direct_velocity_bad_orientation_termination_enabled: bool = False,
@@ -82,6 +84,9 @@ def build_go2_velocity_env_cfg(
     # Appends the previous raw action (12 cols) as a further critic-only tail. With
     # privileged_base_lin_vel this reproduces genesis's 60-col privileged_obs_buf exactly.
     isaac_direct_velocity_privileged_last_actions: bool = False,
+    # Applies genesis's obs_scales (lin_vel 2.0 / ang_vel 0.25 / dof_vel 0.05) together with
+    # genesis's matching post-scale noise magnitudes. The port is otherwise raw physical units.
+    isaac_direct_velocity_genesis_style_obs_scaling_enabled: bool = False,
     # record_video's tracking camera: 'swarm' (default) is a wide overview of every env's
     # robot; 'single_env' chases one robot like genesis_envs/go2_base.py's render() does.
     isaac_video_camera_mode: str = "swarm",
@@ -164,6 +169,7 @@ def build_go2_velocity_env_cfg(
     env_cfg.clip_joint_targets = bool(isaac_direct_velocity_clip_joint_targets)
     env_cfg.use_neutral_action = bool(isaac_direct_velocity_use_neutral_action)
     env_cfg.random_action_center = validate_random_action_center(isaac_random_action_center)
+    env_cfg.action_latency_steps = int(isaac_direct_velocity_action_latency_steps)
 
     env_cfg.enable_termination = bool(isaac_direct_velocity_enable_termination)
     env_cfg.bad_orientation_termination_enabled = bool(isaac_direct_velocity_bad_orientation_termination_enabled)
@@ -182,6 +188,7 @@ def build_go2_velocity_env_cfg(
     env_cfg.randomize_episode_lengths = bool(isaac_randomize_episode_lengths)
     env_cfg.privileged_base_lin_vel = bool(isaac_direct_velocity_privileged_base_lin_vel)
     env_cfg.privileged_last_actions = bool(isaac_direct_velocity_privileged_last_actions)
+    env_cfg.genesis_style_obs_scaling_enabled = bool(isaac_direct_velocity_genesis_style_obs_scaling_enabled)
 
     if isaac_video_camera_mode not in ("swarm", "single_env"):
         raise ValueError(f"isaac_video_camera_mode must be 'swarm' or 'single_env', got {isaac_video_camera_mode!r}")

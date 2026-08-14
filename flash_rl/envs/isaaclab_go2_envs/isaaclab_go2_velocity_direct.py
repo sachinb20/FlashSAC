@@ -20,7 +20,7 @@ import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 import isaaclab.utils.math as math_utils
 import torch
-from isaaclab.actuators import DCMotor
+from isaaclab.actuators import DCMotor, IdealPDActuator, IdealPDActuatorCfg
 from isaaclab.assets import Articulation, ArticulationCfg
 from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -94,7 +94,12 @@ from .isaaclab_unitree_actuators import UnitreeActuatorCfg_Go2HV
 
 GO2_ACTUATOR_MODE_DC_MOTOR = "dc_motor"
 GO2_ACTUATOR_MODE_UNITREE_GO2HV = "unitree_go2hv"
-GO2_ACTUATOR_MODES = frozenset({GO2_ACTUATOR_MODE_DC_MOTOR, GO2_ACTUATOR_MODE_UNITREE_GO2HV})
+# Unclipped explicit PD -- no torque ceiling of any kind, matching genesis. See
+# MotorStrengthIdealPD.
+GO2_ACTUATOR_MODE_IDEAL_PD = "ideal_pd"
+GO2_ACTUATOR_MODES = frozenset(
+    {GO2_ACTUATOR_MODE_DC_MOTOR, GO2_ACTUATOR_MODE_UNITREE_GO2HV, GO2_ACTUATOR_MODE_IDEAL_PD}
+)
 
 # Nominal stance used by TDMPC2's sim-to-real tuning; overrides IsaacLab's stock
 # UNITREE_GO2_CFG defaults (base_z=0.4, thigh 0.8/1.0, calf -1.5).
@@ -135,6 +140,69 @@ class MotorStrengthDCMotor(DCMotor):
         control_action.joint_positions = None
         control_action.joint_velocities = None
         return control_action
+
+
+class MotorStrengthIdealPD(IdealPDActuator):
+    """Explicit PD with motor-strength scaling and **no torque ceiling at all**.
+
+    Matches genesis_envs/go2_base.py's `_compute_torques`, which computes
+    `kp * error_pos - kd * joint_vel`, scales by motor_strengths, and hands the result to
+    `control_dofs_force` without ever consulting a torque limit (go2_base.py reads
+    `self.torque_limits` once and never uses it).
+
+    `_clip_effort` is overridden to the identity, so the actuator's own `effort_limit` is
+    inert. PhysX does not re-clamp either: IsaacLab defaults `effort_limit_sim` to 1e9 for
+    explicit actuators, so the solver enforces no ceiling of its own.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.motor_strength = torch.ones_like(self.computed_effort)
+        self.scaled_motor_strength = torch.zeros_like(self.computed_effort)
+
+    def compute(
+        self,
+        control_action: ArticulationActions,
+        joint_pos: torch.Tensor,
+        joint_vel: torch.Tensor,
+    ) -> ArticulationActions:
+        error_pos = control_action.joint_positions - joint_pos
+        error_vel = control_action.joint_velocities - joint_vel
+        feedforward_effort = control_action.joint_efforts
+        if feedforward_effort is None:
+            feedforward_effort = torch.zeros_like(error_pos)
+
+        effort = self.stiffness * error_pos + self.damping * error_vel + feedforward_effort
+        self.computed_effort = effort * self.motor_strength
+        self.applied_effort = self.computed_effort
+
+        control_action.joint_efforts = self.applied_effort
+        control_action.joint_positions = None
+        control_action.joint_velocities = None
+        return control_action
+
+    def _clip_effort(self, effort: torch.Tensor) -> torch.Tensor:
+        return effort
+
+
+def _make_ideal_pd_actuator_cfg(source_cfg):
+    """Rebuild an actuator cfg as an unclipped IdealPDActuatorCfg, keeping gains/limits."""
+    kwargs = {"joint_names_expr": source_cfg.joint_names_expr}
+    for field_name in (
+        "effort_limit",
+        "effort_limit_sim",
+        "velocity_limit",
+        "velocity_limit_sim",
+        "stiffness",
+        "damping",
+        "armature",
+        "friction",
+    ):
+        if hasattr(source_cfg, field_name):
+            kwargs[field_name] = getattr(source_cfg, field_name)
+    cfg = IdealPDActuatorCfg(**kwargs)
+    cfg.class_type = MotorStrengthIdealPD
+    return cfg
 
 
 def _validate_go2_actuator_model(actuator_model: str) -> str:
@@ -217,6 +285,9 @@ def _make_go2_robot_cfg(
         if getattr(actuator_cfg, "class_type", None) is DCMotor:
             if actuator_model == GO2_ACTUATOR_MODE_DC_MOTOR:
                 actuator_cfg.class_type = MotorStrengthDCMotor
+            elif actuator_model == GO2_ACTUATOR_MODE_IDEAL_PD:
+                actuator_cfg = _make_ideal_pd_actuator_cfg(actuator_cfg)
+                robot_cfg.actuators[name] = actuator_cfg
             else:
                 actuator_cfg = _make_unitree_go2hv_actuator_cfg(actuator_cfg)
                 robot_cfg.actuators[name] = actuator_cfg
@@ -363,6 +434,26 @@ class UnitreeGo2VelocityDirectEnvCfg(DirectRLEnvCfg):
     projected_gravity_noise = (-0.05, 0.05)
     joint_pos_noise = (-0.01, 0.01)
     joint_vel_noise = (-1.5, 1.5)
+
+    # Per-channel observation scaling, applied before the noise (see
+    # _build_current_policy_observation). All 1.0 = the port's native raw-physical-units
+    # observation. genesis_envs/go2_walk.py's obs_scales instead uses lin_vel=2.0,
+    # ang_vel=0.25, dof_pos=1.0, dof_vel=0.05 -- set genesis_style_obs_scaling_enabled to
+    # apply those together with genesis's matching (post-scale) noise magnitudes, since the
+    # two are only meaningful as a pair.
+    obs_scale_base_lin_vel = 1.0
+    obs_scale_base_ang_vel = 1.0
+    obs_scale_projected_gravity = 1.0
+    obs_scale_commands_lin_vel = 1.0
+    obs_scale_commands_ang_vel = 1.0
+    obs_scale_joint_pos = 1.0
+    obs_scale_joint_vel = 1.0
+    genesis_style_obs_scaling_enabled = False
+
+    # action_latency_steps=1 executes the previous control step's action, matching genesis's
+    # action_latency=0.02 (one 20ms control step). genesis asserts the value is 0 or 0.02, so
+    # only 0 and 1 are accepted here.
+    action_latency_steps = 0
 
     terrain_mode = GO2_TERRAIN_MODE_FLAT
     terrain_preset = GO2_TERRAIN_PRESET_ROUGH_MEDIUM
@@ -522,6 +613,30 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
             )
         cfg.yaw_in_place_ang_vel_z_range = (yaw_low, yaw_high)
 
+        cfg.action_latency_steps = int(cfg.action_latency_steps)
+        if cfg.action_latency_steps not in (0, 1):
+            raise ValueError(
+                f"action_latency_steps must be 0 or 1 (genesis supports only a single-control-step "
+                f"delay), got {cfg.action_latency_steps}."
+            )
+        if bool(cfg.genesis_style_obs_scaling_enabled):
+            # genesis_envs/go2_walk.py obs_cfg: obs_scales lin_vel=2.0, ang_vel=0.25,
+            # dof_pos=1.0, dof_vel=0.05 (projected gravity unscaled), and obs_noise ang_vel=0.1,
+            # gravity=0.02, dof_pos=0.01, dof_vel=0.5. The noise magnitudes are genesis's
+            # POST-scale values, which is why they travel with the scales rather than being
+            # left at this cfg's own raw-unit defaults.
+            cfg.obs_scale_base_lin_vel = 2.0
+            cfg.obs_scale_base_ang_vel = 0.25
+            cfg.obs_scale_projected_gravity = 1.0
+            cfg.obs_scale_commands_lin_vel = 2.0
+            cfg.obs_scale_commands_ang_vel = 0.25
+            cfg.obs_scale_joint_pos = 1.0
+            cfg.obs_scale_joint_vel = 0.05
+            cfg.base_ang_vel_noise = (-0.1, 0.1)
+            cfg.projected_gravity_noise = (-0.02, 0.02)
+            cfg.joint_pos_noise = (-0.01, 0.01)
+            cfg.joint_vel_noise = (-0.5, 0.5)
+
         base_observation_dim = go2_direct_velocity_base_observation_dim(
             observe_base_lin_vel=bool(cfg.observe_base_lin_vel),
             height_scan_enabled=bool(cfg.height_scan_enabled),
@@ -551,6 +666,17 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
         self._set_action_buffers_to_reset(torch.arange(self.num_envs, dtype=torch.long, device=self.device))
 
         self._commands = torch.zeros(self.num_envs, 3, device=self.device)
+        # Mirrors genesis's commands_scale = [lin_vel, lin_vel, ang_vel]; a (3,) row vector so
+        # it broadcasts over the env dimension. Only touches the observation -- the reward's
+        # tracking terms read the unscaled self._commands.
+        self._command_obs_scale = torch.tensor(
+            [
+                float(self.cfg.obs_scale_commands_lin_vel),
+                float(self.cfg.obs_scale_commands_lin_vel),
+                float(self.cfg.obs_scale_commands_ang_vel),
+            ],
+            device=self.device,
+        )
         self._filtered_base_ang_vel = torch.zeros(self.num_envs, 3, device=self.device)
         self._last_policy_base_ang_vel = torch.zeros_like(self._filtered_base_ang_vel)
         self._heading_targets = torch.zeros(self.num_envs, device=self.device)
@@ -719,7 +845,13 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
         self._previous_actions = self._actions.clone()
         self._previous_processed_actions = self._processed_actions.clone()
         self._actions = actions.clamp(-1.0, 1.0).clone()
-        targets_policy_order = self._decode_actions_to_joint_targets(self._actions)
+        # action_latency_steps=1 executes the PREVIOUS control step's action while the policy
+        # still observes the one it just emitted -- exactly genesis_envs/go2_base.py's
+        # `exec_actions = self.last_actions if self.action_latency > 0 else self.actions`.
+        # The observation and the action_rate penalty both keep using self._actions, matching
+        # genesis (its obs_buf carries self.actions, not the delayed copy).
+        exec_actions = self._previous_actions if int(self.cfg.action_latency_steps) > 0 else self._actions
+        targets_policy_order = self._decode_actions_to_joint_targets(exec_actions)
         self._processed_actions = self._joints_policy_to_sim(targets_policy_order)
         self.actions = self._actions
 
@@ -775,7 +907,9 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
         # genesis_envs/go2_base.py's privileged_obs_buf: base_lin_vel then last_actions.
         critic_extras = []
         if self.cfg.privileged_base_lin_vel:
-            critic_extras.append(self._robot.data.root_lin_vel_b)
+            # Scaled but never noised, matching genesis's privileged_obs_buf tail
+            # (base_lin_vel * obs_scales["lin_vel"]).
+            critic_extras.append(self._robot.data.root_lin_vel_b * float(self.cfg.obs_scale_base_lin_vel))
         if self.cfg.privileged_last_actions:
             # _pre_physics_step rotates _previous_actions before overwriting _actions, so at
             # observation time this is the action from the prior step -- the same quantity
@@ -803,29 +937,47 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
         # Default slices: base ang vel 0:3, projected gravity 3:6, velocity command 6:9,
         # joint pos delta 9:21, joint vel delta 21:33, raw action 33:45.
         # observe_base_lin_vel prepends base lin vel 0:3 and shifts these slices by 3.
+        # Per-channel scaling is applied BEFORE the noise, matching genesis's ordering
+        # (compute_observations() builds obs_buf from already-scaled terms, then adds
+        # `gs_rand_float(-1,1) * obs_noise` on top). With every scale left at its 1.0 default
+        # the two orderings are identical, so this costs nothing for unscaled runs.
         obs_terms = []
         if self.cfg.observe_base_lin_vel:
-            obs_terms.append(self._add_uniform_obs_noise(self._robot.data.root_lin_vel_b, self.cfg.base_lin_vel_noise))
+            obs_terms.append(
+                self._add_uniform_obs_noise(
+                    self._robot.data.root_lin_vel_b * float(self.cfg.obs_scale_base_lin_vel),
+                    self.cfg.base_lin_vel_noise,
+                )
+            )
         base_ang_vel = self._observe_base_ang_vel(commit=commit_filter)
         projected_gravity = self._add_uniform_obs_noise(
-            self._robot.data.projected_gravity_b, self.cfg.projected_gravity_noise
+            self._robot.data.projected_gravity_b * float(self.cfg.obs_scale_projected_gravity),
+            self.cfg.projected_gravity_noise,
         )
         joint_pos_rel = self._add_uniform_obs_noise(
-            self._joints_sim_to_policy(self._robot.data.joint_pos - self._robot.data.default_joint_pos),
+            self._joints_sim_to_policy(self._robot.data.joint_pos - self._robot.data.default_joint_pos)
+            * float(self.cfg.obs_scale_joint_pos),
             self.cfg.joint_pos_noise,
         )
         joint_vel_rel = self._add_uniform_obs_noise(
-            self._joints_sim_to_policy(self._robot.data.joint_vel - self._robot.data.default_joint_vel),
+            self._joints_sim_to_policy(self._robot.data.joint_vel - self._robot.data.default_joint_vel)
+            * float(self.cfg.obs_scale_joint_vel),
             self.cfg.joint_vel_noise,
         )
-        obs_terms.extend([base_ang_vel, projected_gravity, self._commands, joint_pos_rel, joint_vel_rel, self._actions])
+        # Commands carry no noise in either sim; genesis scales them by
+        # commands_scale = [lin_vel, lin_vel, ang_vel].
+        commands = self._commands * self._command_obs_scale
+        obs_terms.extend([base_ang_vel, projected_gravity, commands, joint_pos_rel, joint_vel_rel, self._actions])
         height_scan = self._height_scan_observation()
         if height_scan is not None:
             obs_terms.append(height_scan)
         return torch.cat(obs_terms, dim=-1)
 
     def _observe_base_ang_vel(self, commit: bool = True) -> torch.Tensor:
-        base_ang_vel = self._add_uniform_obs_noise(self._robot.data.root_ang_vel_b, self.cfg.base_ang_vel_noise)
+        base_ang_vel = self._add_uniform_obs_noise(
+            self._robot.data.root_ang_vel_b * float(self.cfg.obs_scale_base_ang_vel),
+            self.cfg.base_ang_vel_noise,
+        )
         base_ang_vel = base_ang_vel_with_optional_ema(
             base_ang_vel,
             self._filtered_base_ang_vel,

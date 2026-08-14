@@ -25,7 +25,10 @@ device: 'cuda:0'
 record_video: false
 
 # Actuator / asset -- isaac_go2_actuator_model=unitree_go2hv, isaac_go2_asset_source=unitree_urdf
-isaac_go2_actuator_model: 'dc_motor'          # 'dc_motor' or 'unitree_go2hv'
+# 'dc_motor'      -- IsaacLab DCMotor, linear torque-speed saturation (effort/velocity limit)
+# 'unitree_go2hv' -- measured Go2HV nonlinear torque-speed envelope
+# 'ideal_pd'      -- explicit PD with NO torque ceiling, matching genesis's _compute_torques
+isaac_go2_actuator_model: 'dc_motor'
 isaac_go2_asset_source: 'isaaclab_usd'        # 'isaaclab_usd' or 'unitree_urdf'
 isaac_go2_urdf_path: null                     # null -> assets/go2_description/urdf/go2_description.urdf
 # PD gains. null keeps the asset's own values (IsaacLab's UNITREE_GO2_CFG: Kp=25, Kd=0.5).
@@ -41,6 +44,9 @@ isaac_direct_velocity_action_decoder: 'scalar'
 isaac_direct_velocity_clip_joint_targets: true
 isaac_direct_velocity_use_neutral_action: false
 isaac_random_action_center: 'zero'
+# 1 executes the previous control step's action while the policy still observes the one it just
+# emitted -- matches genesis's action_latency=0.02 (one 20ms control step). 0 or 1 only.
+isaac_direct_velocity_action_latency_steps: 0
 
 # Termination
 isaac_direct_velocity_enable_termination: true
@@ -76,6 +82,11 @@ isaac_direct_velocity_privileged_base_lin_vel: false
 # privileged_base_lin_vel this reproduces genesis's 60-column privileged_obs_buf exactly
 # ([obs 45 | base_lin_vel 3 | last_actions 12]) when observation_history_enabled=false.
 isaac_direct_velocity_privileged_last_actions: false
+# Applies genesis's per-channel obs_scales (lin_vel x2.0, ang_vel x0.25, dof_vel x0.05, dof_pos
+# and gravity x1.0) plus genesis's matching post-scale noise magnitudes (ang_vel 0.1, gravity
+# 0.02, dof_pos 0.01, dof_vel 0.5). The port is otherwise raw physical units, unscaled. Scales
+# and noise move together because genesis's noise values are defined against the scaled signal.
+isaac_direct_velocity_genesis_style_obs_scaling_enabled: false
 
 # Velocity commands
 isaac_velocity_command_resampling_time_range: [5.0, 7.0]
