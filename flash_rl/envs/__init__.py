@@ -158,6 +158,25 @@ def create_envs(
         eval_env = train_env
         record_env = train_env
 
+    elif env_type == "go2":
+        # Backend-swappable Go2: identical env logic, `env.sim_backend` picks the physics.
+        from flash_rl.envs.go2_sim import make_go2_env
+
+        assert num_eval_envs is None, "Unused hyperparameter in the Go2 env."
+        assert num_record_envs is None, "Unused hyperparameter in the Go2 env."
+        assert "sim_backend" in kwargs, "env.sim_backend must be set ('genesis' or 'isaaclab')."
+        train_env = make_go2_env(
+            env_name=env_name,
+            num_envs=num_train_envs,
+            rescale_action=rescale_action,
+            eval_mode=False,
+            sim_backend=kwargs["sim_backend"],
+            enable_camera=kwargs.get("enable_camera", False),
+        )
+        # One simulator instance per process on both backends.
+        eval_env = train_env
+        record_env = train_env
+
     else:
         raise NotImplementedError
 

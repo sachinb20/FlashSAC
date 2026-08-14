@@ -1,0 +1,32 @@
+##################################################################################
+# Go2 walk -- one environment, swappable physics backend
+#
+# Identical env logic to `env=genesis env.env_name=go2-walk`: same URDF, same PD
+# torque law, same rewards, observations, commands, action pipeline and domain
+# randomisation. `sim_backend` selects only the physics engine.
+#
+#   sim_backend: 'genesis'   -> reference arm (matches the go2-walk baseline)
+#   sim_backend: 'isaaclab'  -> same environment on PhysX
+#
+# NOTE: Genesis and IsaacLab cannot be installed in the same virtualenv
+# (`[tool.uv] conflicts` in pyproject.toml), so each backend runs from its own env.
+##################################################################################
+
+env_type: 'go2'
+env_name: 'go2-walk'
+sim_backend: 'genesis'
+num_env_steps: ${num_env_steps}
+
+# Video recording. Genesis always attaches its floating camera, so this only gates the
+# IsaacLab backend, where turning the renderer on costs training throughput. Set true
+# whenever num_record_episodes > 0, otherwise record_video() gets no frames.
+enable_camera: false
+
+seed: ${seed}
+num_train_envs: ${num_train_envs}
+num_eval_envs: ${num_eval_envs}
+num_record_envs: ${num_record_envs}
+# The policy acts in [-1, 1]; the wrapper rescales by action_range=3.0 and the env
+# scales by action_scale=0.25, giving `target = default_dof_pos + 0.75 * action`.
+rescale_action: true
+max_episode_steps: null
