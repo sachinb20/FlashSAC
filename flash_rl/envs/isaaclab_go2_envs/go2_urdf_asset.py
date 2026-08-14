@@ -126,10 +126,31 @@ def _replace_symlink_or_file(path: Path, target: Path) -> None:
     os.symlink(target, path, target_is_directory=target.is_dir())
 
 
+def strip_go2_rotor_links(urdf_text: str) -> str:
+    """Drop the ``*_rotor`` links and the fixed joints attaching them.
+
+    TDMPC2's go2_description.urdf models each motor rotor as its own 0.089 kg link, fixed to
+    the base -- twelve of them, 1.068 kg in total. genesis-world's bundled go2.urdf has no such
+    links. Every other link's mass, COM and inertia tensor is byte-identical between the two
+    files, so these rotors are the *only* mass difference: they make the port's base body
+    7.99 kg against genesis's 6.92 kg (+15%) and the whole robot 16.09 kg against 15.02 kg
+    (+7%). Stripping them makes the two assets mass-equivalent.
+    """
+    root = ET.fromstring(urdf_text)
+    for link in [node for node in root.findall("link") if str(node.get("name", "")).endswith("_rotor")]:
+        root.remove(link)
+    for joint in root.findall("joint"):
+        child = joint.find("child")
+        if child is not None and str(child.get("link", "")).endswith("_rotor"):
+            root.remove(joint)
+    return ET.tostring(root, encoding="unicode")
+
+
 def stage_go2_urdf_for_isaaclab(
     path: str | os.PathLike[str],
     *,
     staging_dir: str | os.PathLike[str] = GO2_URDF_STAGING_DIR,
+    strip_rotor_links: bool = False,
 ) -> Path:
     source_urdf = resolve_go2_urdf_path(path)
     validate_go2_urdf_joint_contract(source_urdf)
@@ -144,6 +165,12 @@ def stage_go2_urdf_for_isaaclab(
 
     text = source_urdf.read_text(encoding="utf-8")
     text = text.replace("package://go2_description/", "")
-    staged_urdf = staging_path / "go2_description.urdf"
+    # Distinct filename per variant so a stripped and an unstripped run in the same staging
+    # directory cannot pick up each other's cached USD conversion.
+    staged_name = "go2_description.urdf"
+    if strip_rotor_links:
+        text = strip_go2_rotor_links(text)
+        staged_name = "go2_description_no_rotors.urdf"
+    staged_urdf = staging_path / staged_name
     staged_urdf.write_text(text, encoding="utf-8")
     return staged_urdf

@@ -54,6 +54,8 @@ def build_go2_velocity_env_cfg(
     # Use genesis's nominal stance (front thigh 0.8 / rear thigh 1.0, calf -1.5, spawn z 0.42)
     # instead of TDMPC2's fore/aft-symmetric PyMPC stance (thigh 0.9, calf -1.8, z 0.29017).
     isaac_go2_genesis_style_nominal_pose: bool = False,
+    # Drop the *_rotor links genesis's go2.urdf lacks (1.068 kg). unitree_urdf source only.
+    isaac_go2_strip_rotor_links: bool = False,
     # genesis's reset_idx: joints offset by U(-0.3, 0.3) rad off the default, base xy spread
     # +/-1.0 with a U(-0.1, 0.1) roll/pitch tilt and U(0, pi) yaw.
     isaac_direct_velocity_genesis_style_reset_enabled: bool = False,
@@ -98,6 +100,10 @@ def build_go2_velocity_env_cfg(
     # Applies genesis's obs_scales (lin_vel 2.0 / ang_vel 0.25 / dof_vel 0.05) together with
     # genesis's matching post-scale noise magnitudes. The port is otherwise raw physical units.
     isaac_direct_velocity_genesis_style_obs_scaling_enabled: bool = False,
+    # genesis shares one noise draw across the whole batch each step; the port draws per-env.
+    isaac_direct_velocity_obs_noise_shared_across_envs: bool = False,
+    # genesis clips observations to +/-100. null disables.
+    isaac_direct_velocity_obs_clip: float | None = None,
     # record_video's tracking camera: 'swarm' (default) is a wide overview of every env's
     # robot; 'single_env' chases one robot like genesis_envs/go2_base.py's render() does.
     isaac_video_camera_mode: str = "swarm",
@@ -171,6 +177,9 @@ def build_go2_velocity_env_cfg(
     # rebuild it now that the actual actuator_model/asset_source/urdf_path/PD gains are known.
     env_cfg.genesis_style_nominal_pose = bool(isaac_go2_genesis_style_nominal_pose)
     env_cfg.genesis_style_reset_enabled = bool(isaac_direct_velocity_genesis_style_reset_enabled)
+    env_cfg.strip_rotor_links = bool(isaac_go2_strip_rotor_links)
+    env_cfg.obs_noise_shared_across_envs = bool(isaac_direct_velocity_obs_noise_shared_across_envs)
+    env_cfg.obs_clip = None if isaac_direct_velocity_obs_clip is None else float(isaac_direct_velocity_obs_clip)
     env_cfg.command_deadband_lin_vel = float(isaac_velocity_command_deadband_lin_vel)
     env_cfg.command_deadband_ang_vel = float(isaac_velocity_command_deadband_ang_vel)
     env_cfg.robot = _make_go2_robot_cfg(
@@ -180,6 +189,7 @@ def build_go2_velocity_env_cfg(
         env_cfg.pd_stiffness,
         env_cfg.pd_damping,
         env_cfg.genesis_style_nominal_pose,
+        bool(isaac_go2_strip_rotor_links),
     )
     # The base-height reward target defaults to the nominal stance height, so it follows the
     # pose unless explicitly overridden. genesis's go2-walk uses a flat 0.3.

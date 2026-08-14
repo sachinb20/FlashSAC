@@ -253,8 +253,8 @@ def _make_unitree_go2hv_actuator_cfg(source_cfg):
     return UnitreeActuatorCfg_Go2HV(**kwargs)
 
 
-def _make_go2_urdf_spawn_cfg(urdf_path: str):
-    staged_urdf_path = stage_go2_urdf_for_isaaclab(urdf_path)
+def _make_go2_urdf_spawn_cfg(urdf_path: str, strip_rotor_links: bool = False):
+    staged_urdf_path = stage_go2_urdf_for_isaaclab(urdf_path, strip_rotor_links=strip_rotor_links)
     return sim_utils.UrdfFileCfg(
         asset_path=str(staged_urdf_path),
         fix_base=False,
@@ -287,6 +287,7 @@ def _make_go2_robot_cfg(
     pd_stiffness: float | None = None,
     pd_damping: float | None = None,
     genesis_style_nominal_pose: bool = False,
+    strip_rotor_links: bool = False,
 ):
     actuator_model = _validate_go2_actuator_model(actuator_model)
     asset_source = validate_go2_asset_source(asset_source)
@@ -301,7 +302,7 @@ def _make_go2_robot_cfg(
     if asset_source == GO2_ASSET_SOURCE_UNITREE_URDF:
         urdf_path = str(GO2_UNITREE_ROS_URDF_PATH if urdf_path is None else urdf_path)
         validate_go2_urdf_joint_contract(urdf_path)
-        robot_cfg.spawn = _make_go2_urdf_spawn_cfg(urdf_path)
+        robot_cfg.spawn = _make_go2_urdf_spawn_cfg(urdf_path, strip_rotor_links)
     for name, actuator_cfg in robot_cfg.actuators.items():
         if getattr(actuator_cfg, "class_type", None) is DCMotor:
             if actuator_model == GO2_ACTUATOR_MODE_DC_MOTOR:
@@ -455,6 +456,16 @@ class UnitreeGo2VelocityDirectEnvCfg(DirectRLEnvCfg):
     # genesis_style_reset_enabled swaps all of the above in at once; leave it off to keep the
     # port's own reset (no joint noise, base xy +/-0.5, yaw +/-pi, level).
     genesis_style_reset_enabled = False
+    # Drop the twelve 0.089 kg *_rotor links TDMPC2's URDF fixes to the base and genesis's
+    # go2.urdf does not have (1.068 kg total: base 7.99 -> 6.92 kg, robot 16.09 -> 15.02 kg).
+    # Only meaningful with asset_source='unitree_urdf'. See strip_go2_rotor_links.
+    strip_rotor_links = False
+    # genesis draws ONE noise vector of shape (num_obs,) per step and broadcasts it across the
+    # whole batch, so every env sees the identical perturbation; the port draws independently
+    # per env. Same marginal distribution, very different correlation across the batch.
+    obs_noise_shared_across_envs = False
+    # genesis clips obs (and privileged obs) to +/-100. None disables.
+    obs_clip = None
     # Zero a freshly sampled command whose magnitude is under the threshold; genesis uses 0.2
     # on both. 0.0 disables. See apply_go2_command_deadband.
     command_deadband_lin_vel = 0.0
@@ -995,8 +1006,8 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
             # end of its step(), after compute_observations()).
             critic_extras.append(self._previous_actions)
         if not critic_extras:
-            return {"policy": actor_obs}
-        return {"policy": torch.cat([actor_obs, *critic_extras], dim=-1)}
+            return {"policy": self._maybe_clip_observation(actor_obs)}
+        return {"policy": self._maybe_clip_observation(torch.cat([actor_obs, *critic_extras], dim=-1))}
 
     def _snapshot_before_reset(self) -> None:
         """Snapshot true current-step terminal state before any reset mutation runs.
@@ -1159,7 +1170,20 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
         if not self.cfg.enable_observation_noise:
             return value
         low, high = bounds
+        if bool(self.cfg.obs_noise_shared_across_envs):
+            # One draw per channel, broadcast over the env dimension -- genesis's
+            # `gs_rand_float(-1, 1, (num_single_obs,))` is a (45,) tensor added to a
+            # (num_envs, 45) buffer, so the whole batch shares a perturbation each step.
+            shape = (1,) * (value.dim() - 1) + (value.shape[-1],)
+            noise = torch.empty(shape, dtype=value.dtype, device=value.device).uniform_(float(low), float(high))
+            return value + noise
         return value + torch.empty_like(value).uniform_(float(low), float(high))
+
+    def _maybe_clip_observation(self, value: torch.Tensor) -> torch.Tensor:
+        if self.cfg.obs_clip is None:
+            return value
+        limit = abs(float(self.cfg.obs_clip))
+        return torch.clamp(value, min=-limit, max=limit)
 
     def _body_ids_list(self, body_ids) -> list[int]:
         if isinstance(body_ids, torch.Tensor):

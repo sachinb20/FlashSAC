@@ -47,6 +47,11 @@ isaac_go2_genesis_style_nominal_pose: false
 # default (the port's stock event scales by U(1.0, 1.0) = no randomization at all), base xy
 # spread +/-1.0 with a U(-0.1, 0.1) roll/pitch tilt and U(0, pi) yaw.
 isaac_direct_velocity_genesis_style_reset_enabled: false
+# Drop the twelve 0.089 kg *_rotor links that TDMPC2's URDF fixes to the base and genesis's
+# go2.urdf does not have (1.068 kg total -> base 7.99 vs 6.92 kg, robot 16.09 vs 15.02 kg).
+# Every other link's mass/COM/inertia is already identical between the two files, so this is
+# the ONLY mass difference. Requires isaac_go2_asset_source=unitree_urdf.
+isaac_go2_strip_rotor_links: false
 
 # Action pipeline
 isaac_action_scale: 0.85
@@ -100,6 +105,11 @@ isaac_direct_velocity_base_height_target: null
 # 0.02, dof_pos 0.01, dof_vel 0.5). The port is otherwise raw physical units, unscaled. Scales
 # and noise move together because genesis's noise values are defined against the scaled signal.
 isaac_direct_velocity_genesis_style_obs_scaling_enabled: false
+# genesis draws ONE noise vector per step and broadcasts it across every env, so the whole
+# batch shares a perturbation; the port draws independently per env. Set true to match.
+isaac_direct_velocity_obs_noise_shared_across_envs: false
+# genesis clips observations (and privileged obs) to +/-100. null disables.
+isaac_direct_velocity_obs_clip: null
 
 # Velocity commands
 isaac_velocity_command_resampling_time_range: [5.0, 7.0]
