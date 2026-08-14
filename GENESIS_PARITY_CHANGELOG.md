@@ -67,6 +67,73 @@ i.e. no torque ceiling at all. This matches genesis, which hands raw kp/kd torqu
 uses it). PhysX does not re-clamp — IsaacLab defaults `effort_limit_sim` to 1e9 for explicit
 actuators. Verified: 33.09 N·m applied against a 23.5 N·m `effort_limit`, `applied == computed`.
 
+#### ⭐ Best result so far — the reference run
+
+`wandb/run-20260813_193310-fca02qkq`, trained at this commit, is **the best-learning IsaacLab run
+to date**: `avg_return 12.84`, `episode_length 485.3`, `Reward/tracking_lin_vel 0.295` over the
+full 50M steps. Every later commit's additions have so far trained *worse*, so this is the config
+to bisect back toward.
+
+```bash
+OMNI_KIT_ACCEPT_EULA=Y PYTHONPATH=/home/sachin/FlashSAC \
+/home/sachin/miniconda3/envs/env_isaaclab/bin/python train.py \
+  --config_name flashSAC_base --overrides seed=0 \
+  --overrides group_name=go2-walk-compare --overrides exp_name=isaaclab_go2 \
+  --overrides logger_type=wandb --overrides entity_name=null \
+  --overrides evaluation_per_interaction_step=4882 --overrides metrics_per_interaction_step=4882 \
+  --overrides recording_per_interaction_step=4882 --overrides logging_per_interaction_step=488 \
+  --overrides env=isaaclab_go2 \
+  --overrides env.enable_cameras=true --overrides env.record_video=true \
+  --overrides env.isaac_video_camera_mode=single_env \
+  --overrides env.isaac_direct_velocity_terrain_mode=flat \
+  --overrides env.isaac_go2_actuator_model=ideal_pd \
+  --overrides env.isaac_go2_asset_source=unitree_urdf \
+  --overrides env.isaac_go2_pd_stiffness=30.0 \
+  --overrides env.isaac_go2_pd_damping=1.5 \
+  --overrides env.isaac_action_scale=0.75 \
+  --overrides env.isaac_direct_velocity_clip_joint_targets=false \
+  --overrides env.isaac_direct_velocity_action_latency_steps=1 \
+  --overrides env.isaac_direct_velocity_genesis_style_obs_scaling_enabled=true \
+  --overrides env.isaac_direct_velocity_observation_history_enabled=false \
+  --overrides env.isaac_direct_velocity_privileged_base_lin_vel=true \
+  --overrides env.isaac_direct_velocity_privileged_last_actions=true \
+  --overrides env.isaac_direct_velocity_enable_termination=true \
+  --overrides env.isaac_direct_velocity_genesis_style_termination_enabled=true \
+  --overrides env.isaac_velocity_command_lin_vel_x_range=[-1.0,1.0] \
+  --overrides env.isaac_velocity_command_lin_vel_y_range=[-1.0,1.0] \
+  --overrides env.isaac_velocity_command_ang_vel_z_range=[-1.0,1.0] \
+  --overrides env.isaac_velocity_command_resampling_time_range=[4.0,4.0] \
+  --overrides env.isaac_velocity_command_heading_enabled=false \
+  --overrides env.isaac_velocity_command_rel_heading_envs=0.0 \
+  --overrides env.isaac_velocity_command_rel_standing_envs=0.0 \
+  --overrides env.isaac_velocity_command_rel_yaw_in_place_envs=0.0 \
+  --overrides env.isaac_dr_enabled=true --overrides env.isaac_dr_train_only=true \
+  --overrides env.isaac_dr_kp_scale_range=[0.8,1.2] \
+  --overrides env.isaac_dr_kd_scale_range=[0.8,1.2] \
+  --overrides env.isaac_dr_motor_strength_range=[1.0,1.0] \
+  --overrides env.isaac_dr_static_friction_range=[0.2,1.5] \
+  --overrides env.isaac_dr_dynamic_friction_range=[0.2,1.5] \
+  --overrides env.isaac_dr_base_mass_add_range=[-1.0,3.0] \
+  --overrides env.isaac_dr_base_com_range_x=[-0.01,0.01] \
+  --overrides env.isaac_dr_base_com_range_y=[-0.01,0.01] \
+  --overrides env.isaac_dr_base_com_range_z=[-0.01,0.01] \
+  --overrides num_env_steps=50_000_896 --overrides num_train_envs=1024 \
+  --overrides num_eval_envs=null --overrides num_record_envs=null \
+  --overrides num_eval_episodes=1024 --overrides num_record_episodes=1 \
+  --overrides agent=flashSAC --overrides agent.buffer_max_length=10_000_000 \
+  --overrides agent.buffer_min_length=100_000 --overrides agent.buffer_device_type=cuda \
+  --overrides agent.sample_batch_size=2048 --overrides agent.use_amp=true \
+  --overrides updates_per_interaction_step=2 --overrides agent.asymmetric_observation=true \
+  --overrides gamma=0.95 --overrides n_step=1
+```
+
+Note what this run does **not** set — it predates all of it: no `strip_rotor_links`, no
+`genesis_style_nominal_pose`, no `spawn_height`, no `obs_noise_shared_across_envs`, no `obs_clip`,
+no `genesis_style_reset_enabled`, no `base_height_target`, no command deadband, no
+`motor_offset_range`. It therefore runs on the **PyMPC stance** (thigh 0.9 front and rear, calf
+−1.8, spawn z 0.29017), a base-height target of 0.29017, **no joint-reset randomization**, per-env
+observation noise, unclipped observations, and the unstripped 16.087 kg robot.
+
 ### `9a80e98` — Nominal stance, reset randomization, command deadband, motor-offset DR
 
 | Flag | Default | Genesis value |
@@ -181,6 +248,34 @@ rotor-strip, noise and clip flags have only been checked through hydra compositi
 unit tests — not against a live sim.
 
 ---
+
+## ⚠️ Parity is not the same as performance
+
+The commits after `7b86e4b` each closed a real, verified gap against genesis — and training got
+**worse**, not better. The best run remains `fca02qkq` at `7b86e4b` (avg_return 12.84, episode
+length 485).
+
+Everything added after it went in as **one block of ten flags**, so which one costs the
+performance is currently unknown:
+
+| Flag | Added in | Why it might hurt |
+|---|---|---|
+| `genesis_style_reset_enabled` | `9a80e98` | U(−0.3, 0.3) rad per-joint reset noise is ±17° — a far harder initial-state distribution than the port's previous *zero* joint randomization |
+| `genesis_style_nominal_pose` | `9a80e98` | moves the policy's whole operating point (calf −1.8 → −1.5, thigh 0.9 → 0.8/1.0) |
+| `base_height_target=0.3` | `9a80e98` | at scale −50, a mismatch between the target and the stance's true settling height is a large constant penalty |
+| `obs_noise_shared_across_envs` | `22d7e93` | correlates the noise across all 1024 envs, cutting effective batch diversity for the critic |
+| `spawn_height=0.3` | `89dd442` | with the genesis stance this may leave little or no ground clearance at reset |
+| `strip_rotor_links` | `22d7e93` | changes robot mass **and** forces a fresh URDF→USD conversion |
+| `obs_clip=100.0` | `22d7e93` | should rarely bind under genesis-style scaling |
+| command deadband ×2 | `9a80e98` | removes ~20% of yaw commands from the training distribution |
+| `motor_offset_range` | `9a80e98` | ±0.02 rad joint bias, small |
+
+**Bisect before running another 50M-step job.** Start from the reference command above and add
+back one group at a time. Highest-suspicion first: `genesis_style_reset_enabled`, then the stance
++ `base_height_target` pair, then `obs_noise_shared_across_envs`.
+
+A genesis-faithful setting that trains worse is a legitimate finding, not a bug to hide — but it
+should be attributed to a specific flag, not to the block.
 
 ## What is still different
 
