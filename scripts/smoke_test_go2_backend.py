@@ -45,6 +45,12 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--camera", action="store_true", help="also exercise the video path")
     parser.add_argument(
+        "--save-frame",
+        default=None,
+        help="Where to write the rendered frame (default: smoke_frame_<backend>.png in cwd). "
+        "Only written when --camera is passed.",
+    )
+    parser.add_argument(
         "--spawn-height",
         type=float,
         default=None,
@@ -148,6 +154,31 @@ def main() -> int:
 
     img = env.render()
     print("render            :", None if img is None else (img.shape, img.dtype))
+
+    if img is not None:
+        # Report colour numerically as well as saving the frame: an unlit scene renders
+        # near-black and fully desaturated, which is what "the videos are black and white"
+        # actually looks like. R==G==B on nearly every pixel means no light, not a codec
+        # or channel-order problem.
+        import numpy as np
+
+        px = img.reshape(-1, img.shape[-1])[:, :3].astype(int)
+        mono = float(((px[:, 0] == px[:, 1]) & (px[:, 1] == px[:, 2])).mean())
+        spread = int((px.max(1) - px.min(1)).max())
+        print(f"  colour          : {100 * (1 - mono):.1f}% of pixels carry colour, max channel spread {spread}")
+        print(f"  brightness      : min={px.min()} mean={px.mean():.1f} max={px.max()}")
+        if mono > 0.95 or spread < 10:
+            print("  !! frame is effectively greyscale -- scene is probably unlit")
+
+        out = args.save_frame or f"smoke_frame_{args.backend}.png"
+        try:
+            import imageio.v3 as iio
+
+            iio.imwrite(out, img)
+        except Exception:  # no imageio in this env -- raw array is still inspectable
+            out = out.rsplit(".", 1)[0] + ".npy"
+            np.save(out, img)
+        print("  saved frame     :", os.path.abspath(out))
 
     problems = []
     if env.sim.n_links != EXPECTED["n_links"]:

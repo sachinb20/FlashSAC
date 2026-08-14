@@ -166,3 +166,6 @@ models/**
 # Go2 asset vendored out of the Genesis package by scripts/vendor_go2_asset.py,
 # plus the pre-merged URDF derived from it. Both are regenerated, not authored.
 assets/go2_genesis/
+# smoke-test render output
+smoke_frame_*.png
+smoke_frame_*.npy
