@@ -130,13 +130,20 @@ class IsaacLabSimBackend:
             # env never had to ask for this. Purely visual: lights are inert prims with no
             # effect on physics, so this cannot perturb the dynamics comparison.
             #
-            # A single dome at 2000/0.75, matching what the earlier isaaclab_go2 port used
-            # for its recordings. Adding a second (distant) light on top, or pushing the
-            # dome brighter, washes the scene out: it lifts brightness without adding
-            # saturation, which reads as a pale grey image rather than a lit one.
+            # A single dome, matching what the earlier isaaclab_go2 port used. Adding a
+            # second (distant) light on top washes the scene out: it lifts brightness
+            # without adding saturation, which reads as pale grey rather than lit.
+            #
+            # visible_in_primary_ray defaults to True, which draws the dome itself as a
+            # blown-out white sky filling the frame. It is wanted as a light source, not as
+            # a backdrop, so it is hidden from camera rays here.
             dome_light = AssetBaseCfg(
                 prim_path="/World/Light",
-                spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75)),
+                spawn=sim_utils.DomeLightCfg(
+                    intensity=1200.0,
+                    color=(0.8, 0.82, 0.85),
+                    visible_in_primary_ray=False,
+                ),
             )
             robot: ArticulationCfg = robot_cfg
             contact_forces = ContactSensorCfg(
@@ -151,6 +158,7 @@ class IsaacLabSimBackend:
         # fired during reset, and that callback is what populates Camera._ALL_INDICES.
         # Creating it afterwards yields a camera that raises AttributeError on first use.
         if enable_camera:
+            self._apply_visual_materials(sim_utils)
             self._setup_camera(sim_utils)
 
         self.sim.reset()
@@ -169,6 +177,29 @@ class IsaacLabSimBackend:
         )
 
         self._base_friction: Optional[torch.Tensor] = None
+
+    def _apply_visual_materials(self, sim_utils: Any) -> None:
+        """Give the robot a visible surface.
+
+        The URDF->USD conversion drops the source materials entirely -- the converted USD
+        contains zero ``UsdPreviewSurface`` prims -- so every link renders with the default
+        white surface. A white robot lit by a bright dome is what makes the recording
+        unreadable. The DAE meshes specify a near-black body (``diffuse 0 0 0``), so bind
+        an approximation of that; slightly above black so the form still catches light.
+
+        Cosmetic only, and applied solely when recording, so it cannot affect training.
+        """
+        try:
+            body_path = "/World/Looks/Go2Body"
+            body = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.12, 0.12, 0.13), roughness=0.5, metallic=0.1)
+            body.func(body_path, body)
+
+            targets = sim_utils.find_matching_prim_paths("/World/envs/env_.*/Robot/.*/visuals")
+            for path in targets:
+                sim_utils.bind_visual_material(path, body_path)
+            print(f"[go2/isaaclab] bound body material to {len(targets)} visual prims")
+        except Exception as exc:  # noqa: BLE001 - cosmetic, never fail the run over it
+            print(f"[go2/isaaclab] visual material binding failed (cosmetic only): {exc}")
 
     def _setup_camera(self, sim_utils: Any) -> None:
         """Prepare the viewport render path used for recording.
