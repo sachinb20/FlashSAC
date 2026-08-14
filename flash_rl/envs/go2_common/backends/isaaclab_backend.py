@@ -129,13 +129,14 @@ class IsaacLabSimBackend:
             # looking black and white. Genesis lights its scene by default, so the shared
             # env never had to ask for this. Purely visual: lights are inert prims with no
             # effect on physics, so this cannot perturb the dynamics comparison.
+            #
+            # A single dome at 2000/0.75, matching what the earlier isaaclab_go2 port used
+            # for its recordings. Adding a second (distant) light on top, or pushing the
+            # dome brighter, washes the scene out: it lifts brightness without adding
+            # saturation, which reads as a pale grey image rather than a lit one.
             dome_light = AssetBaseCfg(
-                prim_path="/World/DomeLight",
-                spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.9, 0.9, 0.9)),
-            )
-            distant_light = AssetBaseCfg(
-                prim_path="/World/DistantLight",
-                spawn=sim_utils.DistantLightCfg(intensity=2000.0, color=(1.0, 1.0, 1.0)),
+                prim_path="/World/Light",
+                spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75)),
             )
             robot: ArticulationCfg = robot_cfg
             contact_forces = ContactSensorCfg(
@@ -170,38 +171,36 @@ class IsaacLabSimBackend:
         self._base_friction: Optional[torch.Tensor] = None
 
     def _setup_camera(self, sim_utils: Any) -> None:
-        """Attach a chase camera matching Genesis's floating camera.
+        """Prepare the viewport render path used for recording.
 
-        Genesis records env 0 at 320x320 with a 40 degree FOV from
-        ``robot_pos + [-1, -1, 0.5]`` looking at ``robot_pos + [0, 0, -0.1]``. IsaacLab
-        specifies optics as focal length over aperture rather than an angle, so the focal
-        length is derived to give the same 40 degrees:
-        ``f = aperture / (2 * tan(fov / 2)) = 20.955 / (2 * tan(20 deg)) = 28.79``.
+        Renders through the persp viewport camera (``/OmniverseKit_Persp``) at 1280x720
+        via a replicator render product, which is how ``DirectRLEnv``'s ``rgb_array`` mode
+        works and what the earlier isaaclab_go2 port used for its recordings.
 
-        Failure here is downgraded to a warning: a missing camera should cost you the
-        video, not the training run.
+        A ``Camera`` sensor was tried first and looked markedly worse: at Genesis's 320x320
+        it falls under the RTX pipeline's minimum input resolution (Isaac logs
+        ``DLSS increasing input dimensions: Render resolution of (186, 186) is below
+        minimal input resolution of 300``) and bypasses the viewport's post-processing.
+        Matching Genesis's exact frame size is not worth a visibly degraded image, so the
+        frame is larger here than on the Genesis arm.
+
+        Failure is downgraded to a warning: a missing camera should cost the video, not
+        the training run.
         """
-        import math
-
-        from isaaclab.sensors import Camera, CameraCfg
-
-        aperture = 20.955
-        focal_length = aperture / (2.0 * math.tan(math.radians(40.0) / 2.0))
+        del sim_utils
         try:
-            self._camera = Camera(
-                CameraCfg(
-                    prim_path="/World/RecordCamera",
-                    update_period=0.0,
-                    height=320,
-                    width=320,
-                    data_types=["rgb"],
-                    spawn=sim_utils.PinholeCameraCfg(
-                        focal_length=focal_length,
-                        horizontal_aperture=aperture,
-                        clipping_range=(0.05, 100.0),
-                    ),
-                )
-            )
+            import omni.replicator.core as rep
+
+            # 640x480 rather than the viewer default 1280x720: smaller frames keep the
+            # recorded gifs light, and this still clears the RTX pipeline's minimum input
+            # resolution of 300 (the renderer works at roughly 58% of output, so anything
+            # below ~520 wide starts getting upscaled and looks soft). Genesis's own
+            # 320x320 is well under that, which is why matching it exactly looked worse.
+            self._render_resolution = (640, 480)
+            self._render_product = rep.create.render_product("/OmniverseKit_Persp", self._render_resolution)
+            self._rgb_annotator = rep.AnnotatorRegistry.get_annotator("rgb", device="cpu")
+            self._rgb_annotator.attach([self._render_product])
+            self._camera = "viewport"
         except Exception as exc:  # noqa: BLE001 - never let the camera kill training
             print(f"[go2/isaaclab] camera setup failed, video disabled: {exc}")
             self._camera = None
@@ -476,18 +475,20 @@ class IsaacLabSimBackend:
         import numpy as np
 
         base = track_pos if track_pos is not None else torch.zeros(3, device=self.device)
-        base = base.to(self.device) + self.env_origins[0]
-        eye = (base + torch.tensor([-1.0, -1.0, 0.5], device=self.device)).unsqueeze(0)
-        target = (base + torch.tensor([0.0, 0.0, -0.1], device=self.device)).unsqueeze(0)
-        self._camera.set_world_poses_from_view(eye, target)
-
+        base = (base.to(self.device) + self.env_origins[0]).tolist()
+        # Genesis's chase framing: eye behind/left/above, looking slightly below the base.
+        self.sim.set_camera_view(
+            (base[0] - 1.0, base[1] - 1.0, base[2] + 0.5),
+            (base[0], base[1], base[2] - 0.1),
+        )
         self.sim.render()
-        self._camera.update(self._sim_dt)
 
-        rgb = self._camera.data.output["rgb"][0]
-        if rgb.shape[-1] == 4:  # drop alpha; Genesis returns 3 channels
-            rgb = rgb[..., :3]
-        return rgb.detach().cpu().numpy().astype(np.uint8)
+        rgb = self._rgb_annotator.get_data()
+        rgb = np.frombuffer(rgb, dtype=np.uint8).reshape(*rgb.shape)
+        if rgb.size == 0:  # renderer still warming up
+            w, h = self._render_resolution
+            return np.zeros((h, w, 3), dtype=np.uint8)
+        return rgb[:, :, :3]
 
     def draw_debug(self, foot_positions: torch.Tensor, com: torch.Tensor, terrain_heights: torch.Tensor) -> None:
         return
