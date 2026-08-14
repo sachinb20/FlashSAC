@@ -292,6 +292,7 @@ uv run python train.py \
     --overrides num_eval_envs=null --overrides num_record_envs=null \
     --overrides num_eval_episodes=1024 --overrides num_record_episodes=1 \
     --overrides agent=flashSAC \
+    --overrides agent.compile_mode=max-autotune-no-cudagraphs \
     --overrides agent.buffer_max_length=10_000_000 \
     --overrides agent.buffer_min_length=100_000 \
     --overrides agent.buffer_device_type=cuda \
@@ -320,6 +321,7 @@ uv run --extra isaaclab python train.py \
     --overrides num_eval_envs=null --overrides num_record_envs=null \
     --overrides num_eval_episodes=1024 --overrides num_record_episodes=1 \
     --overrides agent=flashSAC \
+    --overrides agent.compile_mode=max-autotune-no-cudagraphs \
     --overrides agent.buffer_max_length=10_000_000 \
     --overrides agent.buffer_min_length=100_000 \
     --overrides agent.buffer_device_type=cuda \
@@ -328,6 +330,23 @@ uv run --extra isaaclab python train.py \
     --overrides agent.asymmetric_observation=true \
     --overrides gamma=0.95 --overrides n_step=1
 ```
+
+### Required: disable CUDA graphs
+
+Both commands pass `agent.compile_mode=max-autotune-no-cudagraphs`. The config default
+`compile_mode: 'auto'` resolves to `max-autotune` on torch >= 2.9, which force-enables
+CUDA graphs, and the IsaacLab arm dies a few dozen updates in:
+
+```
+RuntimeError: These live storage data ptrs are in the cudagraph pool but not accounted
+for as an output of cudagraph trees
+```
+
+CUDA graphs demand strict accounting of every allocation in their memory pool, and Isaac
+Sim runs CUDA inside the same process, so its allocations land there unaccounted.
+`max-autotune-no-cudagraphs` keeps max-autotune and coordinate-descent tuning and drops
+only the graphs. Genesis does not hit this, but the flag is passed on both arms anyway:
+the agent must stay identical across the comparison.
 
 ### The complete list of differences
 
