@@ -252,9 +252,11 @@ class Go2WalkEasyEnv:
         self.reset_buf[envs_idx] = True
 
         # fill extras
+        # NOTE: bare reward-term names (no "rew_" prefix) -- see go2_base.py's
+        # matching NOTE for why.
         self.extras["episode"] = {}
         for key in self.episode_sums.keys():
-            self.extras["episode"]["rew_" + key] = (
+            self.extras["episode"][key] = (
                 torch.mean(self.episode_sums[key][envs_idx]).item() / self.env_cfg["episode_length_s"]
             )
             self.episode_sums[key][envs_idx] = 0.0

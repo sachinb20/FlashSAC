@@ -774,9 +774,14 @@ class Go2BaseEnv:
         self.reset_buf[envs_idx] = 1
 
         # fill extras
+        # NOTE: keys are the bare reward-term names (no "rew_" prefix) so that
+        # genesis.py's step() wrapper produces "Reward/<name>" keys matching the
+        # IsaacLab go2 env's _update_episode_info() convention (see
+        # isaaclab_go2_velocity_direct.py) -- keeps wandb metric names comparable
+        # across simulators.
         self.extras["episode"] = {}
         for key in self.episode_sums.keys():
-            self.extras["episode"]["rew_" + key] = (
+            self.extras["episode"][key] = (
                 torch.mean(self.episode_sums[key][envs_idx]).item() / self.max_episode_length_s
             )
             self.episode_sums[key][envs_idx] = 0.0

@@ -556,7 +556,7 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
         self._last_reward_terms: dict[str, torch.Tensor] = {}
         # Per-episode reward-rate summary (python floats), refreshed in _reset_idx before
         # _episode_sums is zeroed for the resetting envs. Mirrors go2_base.py's
-        # extras["episode"]["rew_<name>"] = mean(episode_sums[env_ids]) / max_episode_length_s.
+        # extras["episode"][name] = mean(episode_sums[env_ids]) / max_episode_length_s.
         self._last_episode_info: dict[str, float] = {}
 
         self._base_id, _ = self._contact_sensor.find_bodies("base")
