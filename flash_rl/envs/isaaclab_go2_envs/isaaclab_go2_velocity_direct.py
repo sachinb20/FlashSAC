@@ -50,6 +50,11 @@ from .go2_motor_strength_randomization import (
     randomize_motor_strength,
     restore_motor_strength_defaults,
 )
+from .go2_pd_gain_randomization import (
+    PD_GAIN_FIELDS,
+    randomize_pd_gains,
+    restore_pd_gain_defaults,
+)
 from .go2_termination import go2_bad_orientation_mask_from_projected_gravity, go2_update_bad_orientation_hysteresis
 from .go2_terrain_cfg import (
     GO2_HEIGHT_SCAN_DEFAULT_CLIP,
@@ -193,6 +198,8 @@ def _make_go2_robot_cfg(
     actuator_model: str = GO2_ACTUATOR_MODE_DC_MOTOR,
     asset_source: str = GO2_ASSET_SOURCE_ISAACLAB_USD,
     urdf_path: str | None = None,
+    pd_stiffness: float | None = None,
+    pd_damping: float | None = None,
 ):
     actuator_model = _validate_go2_actuator_model(actuator_model)
     asset_source = validate_go2_asset_source(asset_source)
@@ -211,7 +218,16 @@ def _make_go2_robot_cfg(
             if actuator_model == GO2_ACTUATOR_MODE_DC_MOTOR:
                 actuator_cfg.class_type = MotorStrengthDCMotor
             else:
-                robot_cfg.actuators[name] = _make_unitree_go2hv_actuator_cfg(actuator_cfg)
+                actuator_cfg = _make_unitree_go2hv_actuator_cfg(actuator_cfg)
+                robot_cfg.actuators[name] = actuator_cfg
+        # Applied after the actuator-model swap: _make_unitree_go2hv_actuator_cfg copies
+        # stiffness/damping straight off the source cfg, so selecting unitree_go2hv changes
+        # only the torque-speed envelope -- the gains stay at whatever UNITREE_GO2_CFG
+        # declares (Kp=25, Kd=0.5) unless overridden here.
+        if pd_stiffness is not None:
+            actuator_cfg.stiffness = float(pd_stiffness)
+        if pd_damping is not None:
+            actuator_cfg.damping = float(pd_damping)
     return robot_cfg
 
 
@@ -301,6 +317,12 @@ class UnitreeGo2VelocityDirectEnvCfg(DirectRLEnvCfg):
     # flag (not this one) decides whether the actor is actually restricted to the prefix --
     # see flash_rl/agents/flashSAC/agent.py's actor_observation_dim resolution.
     privileged_base_lin_vel = False
+    # Adds the previous raw action (12 cols) as a further critic-only tail. Together with
+    # privileged_base_lin_vel this reproduces genesis_envs/go2_base.py's privileged_obs_buf
+    # exactly: [actor obs | base_lin_vel (3) | last_actions (12)], i.e. 45 -> 60 at
+    # observation_history_enabled=false. Off by default. Order matters -- base_lin_vel first,
+    # then last_actions -- to match genesis's concatenation order column for column.
+    privileged_last_actions = False
     action_decoder = ACTION_DECODER_SCALAR
     use_neutral_action = False
     random_action_center = RANDOM_ACTION_CENTER_ZERO
@@ -315,9 +337,18 @@ class UnitreeGo2VelocityDirectEnvCfg(DirectRLEnvCfg):
     dr_base_com_range_z = (-0.05, 0.05)
     dr_motor_strength_range = (0.9, 1.1)
     dr_motor_strength_per_joint = True
+    # Per-joint, per-episode uniform scaling of the actuator's Kp/Kd, matching
+    # genesis_envs/go2_walk.py's kp_scale_range/kd_scale_range. (1.0, 1.0) disables it, which
+    # is the default -- the port's own DR surface randomizes motor_strength instead.
+    dr_kp_scale_range = (1.0, 1.0)
+    dr_kd_scale_range = (1.0, 1.0)
     actuator_model = GO2_ACTUATOR_MODE_DC_MOTOR
     asset_source = GO2_ASSET_SOURCE_ISAACLAB_USD
     urdf_path = str(GO2_UNITREE_ROS_URDF_PATH)
+    # None keeps whatever the asset declares (UNITREE_GO2_CFG: Kp=25, Kd=0.5). Genesis's
+    # go2-walk uses Kp=30, Kd=1.5 -- see _make_go2_robot_cfg.
+    pd_stiffness = None
+    pd_damping = None
 
     # video_camera_mode='swarm' points the tracking camera at the centroid of every env's
     # robot (a wide overview of the whole batch). 'single_env' instead chases one robot
@@ -505,6 +536,8 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
         # so any critic-only privileged addition must be included here, not just the actor part.
         self.actor_observation_dim = base_observation_dim * frame_count
         critic_extra_dim = 3 if bool(cfg.privileged_base_lin_vel) else 0
+        if bool(cfg.privileged_last_actions):
+            critic_extra_dim += int(cfg.action_space)
         cfg.observation_space = self.actor_observation_dim + critic_extra_dim
         super().__init__(cfg, render_mode, **kwargs)
 
@@ -735,14 +768,23 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
     def compute_policy_observations(self, update_history: bool = True) -> dict:
         current_obs = self._build_current_policy_observation(commit_filter=update_history)
         actor_obs = self._compose_policy_observation(current_obs, update_history=update_history)
-        if not self.cfg.privileged_base_lin_vel:
+        # Privileged critic-only tails, appended after the actor's own columns so the prefix
+        # property (critic[:, :actor_observation_dim] == actor) holds. Neither ever enters the
+        # actor's observation_history ring buffer -- they are raw current-frame values, not
+        # stacked -- unlike the rest of the actor observation. Concatenation order matches
+        # genesis_envs/go2_base.py's privileged_obs_buf: base_lin_vel then last_actions.
+        critic_extras = []
+        if self.cfg.privileged_base_lin_vel:
+            critic_extras.append(self._robot.data.root_lin_vel_b)
+        if self.cfg.privileged_last_actions:
+            # _pre_physics_step rotates _previous_actions before overwriting _actions, so at
+            # observation time this is the action from the prior step -- the same quantity
+            # genesis calls last_actions (it assigns last_actions = actions only at the very
+            # end of its step(), after compute_observations()).
+            critic_extras.append(self._previous_actions)
+        if not critic_extras:
             return {"policy": actor_obs}
-        # Privileged critic-only tail: true (unnoised) base_lin_vel_b, appended after the actor's
-        # own columns so the prefix property (critic[:, :actor_observation_dim] == actor) holds.
-        # Never enters the actor's observation_history ring buffer -- it is a raw current-frame
-        # value, not stacked -- unlike the rest of the actor observation.
-        critic_extra = self._robot.data.root_lin_vel_b
-        return {"policy": torch.cat([actor_obs, critic_extra], dim=-1)}
+        return {"policy": torch.cat([actor_obs, *critic_extras], dim=-1)}
 
     def _snapshot_before_reset(self) -> None:
         """Snapshot true current-step terminal state before any reset mutation runs.
@@ -1100,6 +1142,10 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
         self._dr_default_actuator_state = {}
         for name, actuator in self._robot.actuators.items():
             state = {"effort_limit": actuator.effort_limit.detach().clone()}
+            for gain_field in PD_GAIN_FIELDS:
+                gains = getattr(actuator, gain_field, None)
+                if isinstance(gains, torch.Tensor):
+                    state[gain_field] = gains.detach().clone()
             if hasattr(actuator, "motor_strength"):
                 state["motor_strength"] = actuator.motor_strength.detach().clone()
             if hasattr(actuator, "scaled_motor_strength"):
@@ -1122,6 +1168,7 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
         self._randomize_base_com(env_ids_cpu)
         self._randomize_friction(env_ids_cpu)
         self._randomize_motor_strength(env_ids)
+        self._randomize_pd_gains(env_ids)
 
     def _restore_domain_randomization_defaults(self, env_ids: torch.Tensor) -> None:
         env_ids_cpu = env_ids.detach().cpu()
@@ -1143,6 +1190,7 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
             env_ids,
             refresh_velocity_limit=self._refresh_dc_motor_velocity_limit,
         )
+        restore_pd_gain_defaults(self._robot.actuators, self._dr_default_actuator_state, env_ids)
 
     def _randomize_base_mass(self, env_ids_cpu: torch.Tensor) -> None:
         body_ids = torch.as_tensor(self._base_body_ids, dtype=torch.long)
@@ -1201,6 +1249,15 @@ class UnitreeGo2VelocityDirectEnv(DirectRLEnv):
             bool(self.cfg.dr_motor_strength_per_joint),
             refresh_velocity_limit=self._refresh_dc_motor_velocity_limit,
             require_motor_strength=not motor_strength_range_is_default(tuple(self.cfg.dr_motor_strength_range)),
+        )
+
+    def _randomize_pd_gains(self, env_ids: torch.Tensor) -> None:
+        randomize_pd_gains(
+            self._robot.actuators,
+            self._dr_default_actuator_state,
+            env_ids,
+            tuple(self.cfg.dr_kp_scale_range),
+            tuple(self.cfg.dr_kd_scale_range),
         )
 
     def _refresh_dc_motor_velocity_limit(self, actuator) -> None:

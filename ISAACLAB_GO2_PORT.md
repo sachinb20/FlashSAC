@@ -79,14 +79,25 @@ verified via a real hydra-compose + live env test at each step, not just read fr
 | `gamma` | 0.99 | 0.95 |
 | `n_step` | 3 | 1 |
 | `agent.asymmetric_observation` | false | true (needed `privileged_base_lin_vel` built first) |
-| Observation width | 225 (4-frame history stack) | 45 (`observation_history_enabled=false`) |
+| Actor observation width | 225 (4-frame history stack) | 45 (`observation_history_enabled=false`) |
+| Critic observation width | 225 (no privileged tail) | 60 (`privileged_base_lin_vel=true` + `privileged_last_actions=true`) |
+| PD gains | Kp=25, Kd=0.5 (IsaacLab's `UNITREE_GO2_CFG`) | Kp=30, Kd=1.5 (`isaac_go2_pd_stiffness/damping`) |
+| Kp/Kd randomization | none | ±20% per joint per episode (`isaac_dr_kp_scale_range/kd_scale_range=[0.8,1.2]`) |
 | Termination | disabled | enabled, `genesis_style_termination_enabled=true` |
 
-**Action scale turned out to already match** (0.75 effective joint-delta-per-unit-action in both --
-genesis's `action_range=3.0 x action_scale=0.25` and this port's direct `action_scale=0.75` reduce
-to the identical formula `target = default_joint_pos + 0.75 x policy_output`); an earlier claim in
-this doc's own history that these differed was a miscalculation, corrected once the full genesis
-pipeline was traced.
+**Action scale matches only when explicitly overridden.** The effective joint-delta-per-unit-action
+is 0.75 in both once set -- genesis's `action_range=3.0 x action_scale=0.25` (the `x3.0` applied by
+`genesis.py`'s wrapper, the `x0.25` inside the env) and this port's direct `action_scale=0.75`
+reduce to the identical formula `target = default_joint_pos + 0.75 x policy_output`. But the port's
+own default is **`isaac_action_scale: 0.85`**, not 0.75, so a run that omits the override is
+silently 13% hotter on every joint command than the genesis arm. Always pass it.
+
+**PD gains are NOT set by the actuator model.** Selecting
+`isaac_go2_actuator_model=unitree_go2hv` swaps only the torque-speed envelope
+(`unitree_go2hv_clip_effort`, X1/X2/Y1/Y2) -- `_make_unitree_go2hv_actuator_cfg` copies
+`stiffness`/`damping` straight off the source cfg, so the gains stay at `UNITREE_GO2_CFG`'s
+Kp=25/Kd=0.5 under either actuator model. Use `isaac_go2_pd_stiffness`/`isaac_go2_pd_damping`
+(both `null` by default = keep the asset's values).
 
 ## What's still different (the actual thing under test, or not fixable via a flag)
 
@@ -94,23 +105,30 @@ pipeline was traced.
 |---|---|---|
 | Physics engine | Genesis | Isaac Sim / PhysX |
 | Robot asset | genesis-world's bundled `go2.urdf` | TDMPC2's `go2_description.urdf` |
-| Actuator / PD gains | Linear PD, `Kp=30, Kd=1.5`, **randomized +/-20% per episode** | Go2HV nonlinear torque-speed envelope, `Kp=25, Kd=0.5`, **fixed** |
+| Torque saturation | none (linear PD, unclipped) | Go2HV nonlinear torque-speed envelope |
 | Action-execution delay | 1 control step (20ms) | none |
 | Observation scaling | fixed per-channel constants (`ang_vel x0.25`, `dof_vel x0.05`, ...) | raw physical units, unscaled |
-| Domain-randomization surface | friction + mass + com + motor_offset + **kp_scale + kd_scale** | friction + mass + com + **motor_strength** |
+| Domain-randomization surface | friction + mass + com + **motor_offset** + kp_scale + kd_scale | friction + mass + com + **motor_strength** + kp_scale + kd_scale |
 | Joint action ordering | grouped per-leg | grouped per-joint-type (hip/thigh/calf) |
 
-None of these have a config flag that makes them equivalent -- the actuator/PD row is the actual
-subject of the port, and the rest would need new code, not a different override.
+The **torque-saturation row is the actual subject of the port** -- genesis applies a plain linear
+PD with no torque ceiling, this port clips through the measured Go2HV envelope. The remaining rows
+(action delay, obs scaling, `motor_offset` vs `motor_strength`, joint ordering) have no flag and
+would need new code.
+
+Previously listed here but **now closeable via flags** (see the matching table above): PD gain
+values, Kp/Kd randomization, and the privileged-observation width.
 
 ## Known checkpoints (this machine)
 
 | Run | Path | Config |
 |---|---|---|
-| Vanilla baseline | `models/test/test/go2-walk/seed0-0812-022306/step48829` | Genesis `go2-walk`, full 1024-env/50M-step run |
-| v1 | `models/isaaclab_go2_test/v1/go2-vel-direct/seed0-0812-041000/step19531` | isaaclab_go2, unmatched (256 envs/5M steps, symmetric obs) |
-| v2 | `models/isaaclab_go2_test/v2/go2-vel-direct/seed0-0812-042709/step195312` | isaaclab_go2, unmatched, 10x longer than v1 |
-| v3 | `models/isaaclab_go2_test/v3/go2-vel-direct/seed0-0812-163347/step48829` | isaaclab_go2, **fully matched** to vanilla (see table above) |
+| wandb compare | `models/go2-walk-compare/isaaclab_go2/go2-vel-direct/seed0-0813-160150/step48829` | isaaclab_go2, **unmatched**: stock `dc_motor`/`isaaclab_usd` asset, `action_scale=0.85`, actor+critic obs 225 (no privileged tail despite `asymmetric_observation=true`), Kp=25/Kd=0.5 |
+
+Earlier `models/isaaclab_go2_test/v1..v3` checkpoints referenced by past revisions of this doc are
+**no longer on disk** -- `models/` currently holds only `go2-walk-compare/`. The v3 run that the
+matching table was originally validated against is gone; the only surviving isaaclab_go2 checkpoint
+is the unmatched one above, so it should not be used as the port's comparison arm.
 
 Checkpoints/tensorboard runs/videos are gitignored (`models/**`, `runs/**`, `videos/**`) -- this
 table is the pointer to what exists on disk, not something git tracks.
@@ -123,16 +141,21 @@ Train (v3-equivalent, matched comparison):
     --overrides env=isaaclab_go2 \
     --overrides env.isaac_go2_actuator_model=unitree_go2hv \
     --overrides env.isaac_go2_asset_source=unitree_urdf \
+    --overrides env.isaac_go2_pd_stiffness=30.0 \
+    --overrides env.isaac_go2_pd_damping=1.5 \
     --overrides env.isaac_action_scale=0.75 \
     --overrides env.isaac_direct_velocity_clip_joint_targets=false \
     --overrides env.isaac_dr_enabled=true \
     --overrides env.isaac_dr_train_only=true \
     --overrides env.isaac_dr_motor_strength_per_joint=true \
+    --overrides env.isaac_dr_kp_scale_range=[0.8,1.2] \
+    --overrides env.isaac_dr_kd_scale_range=[0.8,1.2] \
     --overrides env.isaac_direct_velocity_observe_base_lin_vel=false \
     --overrides env.isaac_direct_velocity_enable_termination=true \
     --overrides env.isaac_direct_velocity_genesis_style_termination_enabled=true \
     --overrides env.isaac_direct_velocity_base_ang_vel_filter_alpha=0.2 \
     --overrides env.isaac_direct_velocity_privileged_base_lin_vel=true \
+    --overrides env.isaac_direct_velocity_privileged_last_actions=true \
     --overrides env.isaac_direct_velocity_observation_history_enabled=false \
     --overrides agent=flashSAC --overrides agent.asymmetric_observation=true \
     --overrides gamma=0.95 --overrides n_step=1 \

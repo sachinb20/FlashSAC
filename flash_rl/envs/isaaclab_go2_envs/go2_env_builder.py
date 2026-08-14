@@ -46,6 +46,11 @@ def build_go2_velocity_env_cfg(
     isaac_go2_actuator_model: str = GO2_ACTUATOR_MODE_DC_MOTOR,
     isaac_go2_asset_source: str = GO2_ASSET_SOURCE_ISAACLAB_USD,
     isaac_go2_urdf_path: str | None = None,
+    # PD gains. None keeps the asset's own values (UNITREE_GO2_CFG: Kp=25, Kd=0.5); genesis's
+    # go2-walk uses Kp=30, Kd=1.5. Selecting isaac_go2_actuator_model=unitree_go2hv does NOT
+    # change the gains on its own -- it only swaps the torque-speed envelope.
+    isaac_go2_pd_stiffness: float | None = None,
+    isaac_go2_pd_damping: float | None = None,
     # action pipeline
     isaac_action_scale: float = 0.85,
     isaac_direct_velocity_action_decoder: str = ACTION_DECODER_SCALAR,
@@ -74,6 +79,9 @@ def build_go2_velocity_env_cfg(
     # privileged critic-only observation (off by default -- see UnitreeGo2VelocityDirectEnvCfg
     # .privileged_base_lin_vel). Only meaningful together with agent.asymmetric_observation=true.
     isaac_direct_velocity_privileged_base_lin_vel: bool = False,
+    # Appends the previous raw action (12 cols) as a further critic-only tail. With
+    # privileged_base_lin_vel this reproduces genesis's 60-col privileged_obs_buf exactly.
+    isaac_direct_velocity_privileged_last_actions: bool = False,
     # record_video's tracking camera: 'swarm' (default) is a wide overview of every env's
     # robot; 'single_env' chases one robot like genesis_envs/go2_base.py's render() does.
     isaac_video_camera_mode: str = "swarm",
@@ -102,6 +110,10 @@ def build_go2_velocity_env_cfg(
     isaac_dr_base_com_range_z: tuple[float, float] = (-0.05, 0.08),
     isaac_dr_motor_strength_range: tuple[float, float] = (0.9, 1.1),
     isaac_dr_motor_strength_per_joint: bool = True,
+    # Per-joint, per-episode Kp/Kd scaling, matching genesis's kp_scale_range/kd_scale_range.
+    # (1.0, 1.0) disables it.
+    isaac_dr_kp_scale_range: tuple[float, float] = (1.0, 1.0),
+    isaac_dr_kd_scale_range: tuple[float, float] = (1.0, 1.0),
     # terrain (flat + rough)
     isaac_direct_velocity_terrain_mode: str = GO2_TERRAIN_MODE_FLAT,
     isaac_direct_velocity_terrain_preset: str | None = None,
@@ -135,9 +147,13 @@ def build_go2_velocity_env_cfg(
     env_cfg.actuator_model = actuator_model
     env_cfg.asset_source = asset_source
     env_cfg.urdf_path = urdf_path
+    env_cfg.pd_stiffness = None if isaac_go2_pd_stiffness is None else float(isaac_go2_pd_stiffness)
+    env_cfg.pd_damping = None if isaac_go2_pd_damping is None else float(isaac_go2_pd_damping)
     # The robot cfg is built once at dataclass-definition time with the default actuator/asset;
-    # rebuild it now that the actual actuator_model/asset_source/urdf_path are known.
-    env_cfg.robot = _make_go2_robot_cfg(actuator_model, asset_source, urdf_path)
+    # rebuild it now that the actual actuator_model/asset_source/urdf_path/PD gains are known.
+    env_cfg.robot = _make_go2_robot_cfg(
+        actuator_model, asset_source, urdf_path, env_cfg.pd_stiffness, env_cfg.pd_damping
+    )
 
     env_cfg.seed = int(seed)
     env_cfg.scene.num_envs = int(num_envs)
@@ -165,6 +181,7 @@ def build_go2_velocity_env_cfg(
     env_cfg.enable_observation_noise = not bool(isaac_disable_obs_noise)
     env_cfg.randomize_episode_lengths = bool(isaac_randomize_episode_lengths)
     env_cfg.privileged_base_lin_vel = bool(isaac_direct_velocity_privileged_base_lin_vel)
+    env_cfg.privileged_last_actions = bool(isaac_direct_velocity_privileged_last_actions)
 
     if isaac_video_camera_mode not in ("swarm", "single_env"):
         raise ValueError(f"isaac_video_camera_mode must be 'swarm' or 'single_env', got {isaac_video_camera_mode!r}")
@@ -194,6 +211,8 @@ def build_go2_velocity_env_cfg(
     env_cfg.dr_base_com_range_z = tuple(float(v) for v in isaac_dr_base_com_range_z)
     env_cfg.dr_motor_strength_range = tuple(float(v) for v in isaac_dr_motor_strength_range)
     env_cfg.dr_motor_strength_per_joint = bool(isaac_dr_motor_strength_per_joint)
+    env_cfg.dr_kp_scale_range = tuple(float(v) for v in isaac_dr_kp_scale_range)
+    env_cfg.dr_kd_scale_range = tuple(float(v) for v in isaac_dr_kd_scale_range)
 
     env_cfg.terrain_mode = str(isaac_direct_velocity_terrain_mode)
     if isaac_direct_velocity_terrain_preset is not None:
