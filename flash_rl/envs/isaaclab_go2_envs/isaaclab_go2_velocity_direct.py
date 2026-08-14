@@ -288,11 +288,16 @@ def _make_go2_robot_cfg(
     pd_damping: float | None = None,
     genesis_style_nominal_pose: bool = False,
     strip_rotor_links: bool = False,
+    spawn_height: float | None = None,
 ):
     actuator_model = _validate_go2_actuator_model(actuator_model)
     asset_source = validate_go2_asset_source(asset_source)
     robot_cfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     nominal_base_z = GENESIS_GO2_NOMINAL_BASE_Z if genesis_style_nominal_pose else PYMPC_GO2_NOMINAL_BASE_Z
+    # Explicit spawn height wins over the pose preset's own. The joint angles still come from
+    # the preset -- only the drop distance changes.
+    if spawn_height is not None:
+        nominal_base_z = float(spawn_height)
     nominal_joint_pos = GENESIS_GO2_NOMINAL_JOINT_POS if genesis_style_nominal_pose else PYMPC_GO2_NOMINAL_JOINT_POS
     robot_cfg.init_state = ArticulationCfg.InitialStateCfg(
         pos=(0.0, 0.0, nominal_base_z),
@@ -460,6 +465,9 @@ class UnitreeGo2VelocityDirectEnvCfg(DirectRLEnvCfg):
     # go2.urdf does not have (1.068 kg total: base 7.99 -> 6.92 kg, robot 16.09 -> 15.02 kg).
     # Only meaningful with asset_source='unitree_urdf'. See strip_go2_rotor_links.
     strip_rotor_links = False
+    # Overrides the spawn z the nominal-pose preset would use (genesis 0.42, PyMPC 0.29017)
+    # without touching its joint angles. None follows the preset.
+    spawn_height = None
     # genesis draws ONE noise vector of shape (num_obs,) per step and broadcasts it across the
     # whole batch, so every env sees the identical perturbation; the port draws independently
     # per env. Same marginal distribution, very different correlation across the batch.

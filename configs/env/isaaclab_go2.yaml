@@ -47,11 +47,17 @@ isaac_go2_genesis_style_nominal_pose: false
 # default (the port's stock event scales by U(1.0, 1.0) = no randomization at all), base xy
 # spread +/-1.0 with a U(-0.1, 0.1) roll/pitch tilt and U(0, pi) yaw.
 isaac_direct_velocity_genesis_style_reset_enabled: false
-# Drop the twelve 0.089 kg *_rotor links that TDMPC2's URDF fixes to the base and genesis's
-# go2.urdf does not have (1.068 kg total -> base 7.99 vs 6.92 kg, robot 16.09 vs 15.02 kg).
-# Every other link's mass/COM/inertia is already identical between the two files, so this is
-# the ONLY mass difference. Requires isaac_go2_asset_source=unitree_urdf.
+# Drop the twelve 0.089 kg *_rotor links that TDMPC2's URDF carries and genesis's go2.urdf
+# does not (1.068 kg, robot 16.087 -> 15.019 kg). They are fixed one link ABOVE the joint they
+# drive, so after PhysX merges fixed-joint children the mass lands as base +5.1%, *_hip +13.1%,
+# *_thigh +7.7%, calf unchanged. Every other link's mass/COM/inertia is already identical
+# between the two files, so this is the ONLY mass difference.
+# Requires isaac_go2_asset_source=unitree_urdf.
 isaac_go2_strip_rotor_links: false
+# Spawn height, overriding whatever the nominal-pose preset would use (genesis drops from
+# 0.42, PyMPC spawns at 0.29017). Joint angles still come from the preset -- only the drop
+# distance changes. null follows the preset.
+isaac_go2_spawn_height: null
 
 # Action pipeline
 isaac_action_scale: 0.85

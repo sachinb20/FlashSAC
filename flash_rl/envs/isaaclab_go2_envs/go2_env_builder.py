@@ -56,6 +56,9 @@ def build_go2_velocity_env_cfg(
     isaac_go2_genesis_style_nominal_pose: bool = False,
     # Drop the *_rotor links genesis's go2.urdf lacks (1.068 kg). unitree_urdf source only.
     isaac_go2_strip_rotor_links: bool = False,
+    # Spawn z, overriding the nominal-pose preset's own (genesis 0.42, PyMPC 0.29017). The
+    # preset's joint angles are unaffected -- only the drop distance changes. None = preset.
+    isaac_go2_spawn_height: float | None = None,
     # genesis's reset_idx: joints offset by U(-0.3, 0.3) rad off the default, base xy spread
     # +/-1.0 with a U(-0.1, 0.1) roll/pitch tilt and U(0, pi) yaw.
     isaac_direct_velocity_genesis_style_reset_enabled: bool = False,
@@ -178,6 +181,7 @@ def build_go2_velocity_env_cfg(
     env_cfg.genesis_style_nominal_pose = bool(isaac_go2_genesis_style_nominal_pose)
     env_cfg.genesis_style_reset_enabled = bool(isaac_direct_velocity_genesis_style_reset_enabled)
     env_cfg.strip_rotor_links = bool(isaac_go2_strip_rotor_links)
+    env_cfg.spawn_height = None if isaac_go2_spawn_height is None else float(isaac_go2_spawn_height)
     env_cfg.obs_noise_shared_across_envs = bool(isaac_direct_velocity_obs_noise_shared_across_envs)
     env_cfg.obs_clip = None if isaac_direct_velocity_obs_clip is None else float(isaac_direct_velocity_obs_clip)
     env_cfg.command_deadband_lin_vel = float(isaac_velocity_command_deadband_lin_vel)
@@ -190,6 +194,7 @@ def build_go2_velocity_env_cfg(
         env_cfg.pd_damping,
         env_cfg.genesis_style_nominal_pose,
         bool(isaac_go2_strip_rotor_links),
+        env_cfg.spawn_height,
     )
     # The base-height reward target defaults to the nominal stance height, so it follows the
     # pose unless explicitly overridden. genesis's go2-walk uses a flat 0.3.
