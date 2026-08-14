@@ -110,9 +110,23 @@ New file: `go2_motor_offset_randomization.py`. Also adds `play_joystick.py` (bel
 
 **Rotor links — a 7% robot mass difference that had gone unnoticed.** A link-by-link diff of the
 two URDFs showed every shared link's mass, COM and inertia tensor is *identical*. But TDMPC2's
-`go2_description.urdf` has 33 links to genesis's 21, including twelve 0.089 kg `*_rotor` links
-fixed to the base. That is 1.068 kg: **base body 7.99 kg vs genesis's 6.92 kg (+15%), whole robot
-16.09 kg vs 15.02 kg (+7%)**. Stripping them reproduces genesis's 15.0190 kg exactly.
+`go2_description.urdf` has 33 links to genesis's 21, including twelve 0.089 kg `*_rotor` links —
+one per actuated joint — that genesis's file does not model at all. Stripping them reproduces
+genesis's 15.0190 kg exactly.
+
+They are **not** all on the base: each rotor is fixed to the link that *carries* its motor, so
+after PhysX merges fixed-joint children into their parent the extra mass lands as follows.
+
+| Rigid body | Genesis | Port | Delta | Rotors merged in |
+|---|---|---|---|---|
+| `base` | 6.921 kg | 7.277 kg | **+5.1%** | 4 × hip rotor |
+| `*_hip` (×4) | 0.678 kg | 0.767 kg | **+13.1%** | 1 × thigh rotor |
+| `*_thigh` (×4) | 1.152 kg | 1.241 kg | **+7.7%** | 1 × calf rotor |
+| `*_calf` (×4) | 0.154 kg | 0.154 kg | — | none |
+| **Whole robot** | **15.019 kg** | **16.087 kg** | **+7.1%** | 12 total |
+
+Per leg that is 2.024 kg → 2.202 kg (+8.8%), and the added mass sits high on the limb (hip and
+thigh, never the calf), so it raises swing-leg inertia as well as total weight.
 
 **Batch-shared observation noise.** Genesis draws
 `gs_rand_float(-1.0, 1.0, (num_single_obs,))` — a `(45,)` tensor added to a `(num_envs, 45)`
