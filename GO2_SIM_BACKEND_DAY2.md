@@ -263,38 +263,143 @@ Genesis solver, with no per-material combine mode.
 
 ---
 
-## Still different from TDMPC2
+## Already identical
 
-**Plant / control:**
+URDF bytes, import settings (merge, capsules, self-collision, solver 8/4), 31-body
+topology and 16.087 kg, sim dt 0.005 / decimation 4 / 50 Hz, 20 s episodes, Kp 25 / Kd 0.5,
+the go2hv envelope, effective action scale 0.75 rad, joint-target clipping off, the torque
+law and its scale-then-clip ordering, soft joint limit factor 0.9, pushes disabled, ground
+contact material and combine mode.
 
-| | here | TDMPC2 |
+---
+
+# What is left to port, before rewards
+
+Read out of both codebases, not from the config tables. Ordered by how it should land.
+
+## Group 1 — the coupled group (one rung, not four)
+
+Run B proved these cannot be separated.
+
+| | now | TDMPC2 |
 |---|---|---|
-| armature | 0.1 | 0.0 — held back deliberately |
-| action latency | 0.02 s (1 step) | none |
-| stance | hip 0, F-thigh 0.8 / R-thigh 1.0, calf −1.5 | hip 0, all thigh 0.9, calf −1.8 |
-| spawn height | 0.42 m | 0.29017 m |
-| friction DR | ×U(0.2, 1.5) multiplicative on the robot | U(0.2, 1.25) **absolute** |
-| motor strength DR | off | on, per-joint U(0.9, 1.1) |
-| motor offset DR | on, ±0.02 rad | none |
-| Kp/Kd DR | on, ±20% each | none |
-| COM DR | ±0.01 m | ±0.05 m |
-| restitution DR | none | U(0.0, 0.15) |
+| `dof_armature` | 0.1 | **0.0** |
+| stance | F-thigh 0.8 / R-thigh 1.0, calf −1.5 | **all thigh 0.9, calf −1.8** |
+| spawn height | 0.42 m | **0.29017 m** |
+| termination | base contact **+ 0.4 rad roll/pitch** | **disabled entirely** |
+| reset joint noise | `default + U(−0.3, 0.3)` rad, additive | **none** — `position_range=(1.0,1.0)` is multiplicative, so it is the identity |
+| reset base xy | ±1.0 m | ±0.5 m |
+| reset base yaw | **U(0, π)** — only half the circle | U(−π, π) |
+| reset roll/pitch | ±0.1 rad | 0 |
 
-**Task side — still entirely Genesis, nothing ported:** observations (45-dim, Genesis
-scaling, batch-shared noise, ±100 clip, no history vs TDMPC2's 225-dim raw-unit 5-frame
-stack), privileged obs (asymmetric 60-dim here; TDMPC2 has none), commands (±1.0 on all
-three axes, 4 s resample, 0.2 deadband vs vx 0.2–0.8 / vy≡0 / ωz ±0.5, 10 s, no deadband),
-rewards (12 Genesis terms vs 17 TDMPC2 terms), termination (base contact + 0.4 rad tilt vs
-**disabled entirely**), reset randomisation, joint ordering in the obs/action vector.
+The yaw range is worth calling out on its own: `rand_float(0.0, 3.14, ...)` means every
+robot spawns facing the upper half-plane, so the policy never sees half of its own heading
+distribution at reset.
 
-**Already identical:** URDF bytes, import settings (merge, capsules, self-collision, solver
-8/4), 31-body topology and 16.087 kg, sim dt 0.005 / decimation 4 / 50 Hz, 20 s episodes,
-Kp 25 / Kd 0.5, the go2hv envelope, effective action scale 0.75 rad, joint-target clipping
-off, torque law and its scale-then-clip ordering, soft joint limit factor 0.9, pushes
-disabled, ground contact material.
+## Group 2 — action pipeline
 
-## Next rung
+Scale already matches at 0.75 rad; one item remains.
 
-Armature, stance, spawn height and termination are **one coupled group**, not four rungs.
-Trying armature 0 again on its own will fail exactly as run B did. The cheapest path is to
-land stance + spawn height + `enable_termination=false` together with it as a single rung.
+| | now | TDMPC2 |
+|---|---|---|
+| action latency | **0.02 s (1 control step)** — `step()` executes `last_actions` | none |
+
+## Group 3 — domain randomisation
+
+**The structural difference comes before any range.** We re-randomise **every 4 s
+mid-episode** — `_randomize_rigids`/`_randomize_controls` are called from
+`post_physics_step` on the command-resample schedule. TDMPC2 re-randomises **only at
+episode reset**. Our policy therefore experiences mass, friction and gains changing
+underneath it mid-episode; theirs sees one fixed robot per episode. That is a different
+learning problem, not a different hyperparameter, and it should be fixed first.
+
+| term | now | TDMPC2 |
+|---|---|---|
+| **friction** | per-env **scalar ratio** ×U(0.2, 1.5), applied uniformly to every shape | per-**shape independent** absolute draws: static U(0.2, 1.25), dynamic U(0.2, 1.25) then `min(dynamic, static)` |
+| **restitution** | not randomised | U(0.0, 0.15) |
+| **base mass** | −1..3 kg, **mass only** | −1..3 kg, **and inertia scaled by the mass ratio** |
+| **base COM** | ±0.01 m per axis | ±0.05 m per axis |
+| **motor strength** | **off** (per-env scalar if enabled) | **on, per-joint** U(0.9, 1.1) |
+| **motor offset** | **on**, ±0.02 rad per joint | **none** |
+| **Kp / Kd scale** | **on**, ±20% each, per joint | **none** |
+| eval behaviour | skips randomisation | explicitly **restores defaults** |
+| pushes | disabled | disabled |
+
+Three of these are qualitative rather than numeric:
+
+- per-shape vs per-env friction — theirs gives each collider its own coefficient, so a
+  single robot can have a grippy front foot and a slippery rear one;
+- mass without inertia vs mass with inertia — we add up to 3 kg to the base and leave its
+  inertia tensor untouched, which is not a physical robot;
+- the offset/strength swap — we perturb the *position* the PD servos toward, they perturb
+  the *torque* it produces.
+
+## Group 4 — observations
+
+| | now | TDMPC2 |
+|---|---|---|
+| units | Genesis scales: ang_vel ×0.25, dof_vel ×0.05, cmd lin ×2.0 | **raw physical units** |
+| noise draw | **batch-shared** — one 45-vector broadcast across all 1024 envs | per-env i.i.d. |
+| noise magnitudes | ang_vel 0.1, gravity 0.02, dof_pos 0.01, dof_vel 0.5 | ang_vel ±0.2, gravity ±0.05, joint_pos ±0.01, joint_vel ±1.5 |
+| clip | ±100 | none |
+| history | 1 frame (45) | **5 frames (225)** |
+| base ang-vel filter | none | **EMA, alpha = 0.2** |
+| privileged obs | 60-dim asymmetric | **none** (`state_space=0`); also flip `agent.asymmetric_observation=false` |
+| joint order | per-leg (FR, FL, RR, RL) | per-joint-type (all hips, all thighs, all calves) |
+
+### ⚠ A decision, not a port: the noise channels are misaligned
+
+The observation is laid out
+
+```
+[ ang_vel 0:3 | gravity 3:6 | commands 6:9 | dof_pos 9:21 | dof_vel 21:33 | actions 33:45 ]
+```
+
+but `_prepare_obs_noise` writes
+
+```
+obs_noise[:,  0:3 ] = ang_vel   0.1     -> ang_vel    correct
+obs_noise[:,  3:6 ] = gravity   0.02    -> gravity    correct
+obs_noise[:, 21:33] = dof_pos   0.01    -> dof_vel    WRONG
+obs_noise[:, 33:45] = dof_vel   0.5     -> actions    WRONG
+```
+
+So dof_pos noise lands on dof_vel, the largest noise term (0.5) lands on the **actions**,
+and dof_pos and the commands receive no noise at all. The indices fit a layout in which
+actions precede dof_pos, so this is almost certainly inherited from an older Genesis
+observation ordering.
+
+It is faithfully preserved from the Genesis baseline, which means correcting it breaks
+comparability with every run recorded so far. Flagged deliberately rather than fixed.
+
+## Group 5 — commands
+
+| | now | TDMPC2 |
+|---|---|---|
+| vx | ±1.0 | **[0.2, 0.8]** (forward only) |
+| vy | ±1.0 | **0** |
+| omega_z | ±1.0 | ±0.5 |
+| resample | 4 s | **10 s** |
+| deadband | axis zeroed below 0.2 | none |
+| yaw-in-place envs | 0 | 0.15 |
+
+Strictly easier than the current task, so `tracking_lin_vel` should *rise*; a fall here
+means something else broke.
+
+## Group 6 — ground
+
+Combine mode is done. What remains is the friction *distribution* feeding it (Group 3):
+our multiplicative ratio on a base value against their absolute per-shape draw. Rough
+terrain, curriculum and the height scan are out of scope for the flat comparison.
+
+## Suggested rung order
+
+1. **Coupled group** — armature + stance + spawn height + termination + reset. Highest
+   risk, and nothing else unblocks armature 0.
+2. **DR** — the reset-only *timing* fix first, since it is structural, then the ranges.
+3. **Commands** — cheap, and should improve tracking.
+4. **Observations** — last before rewards. First rung that changes the network input shape
+   (45 -> 225, and drops the asymmetric critic), so the first that can fail for
+   learner-side rather than environment-side reasons.
+
+Action latency can ride along with any of the above.
