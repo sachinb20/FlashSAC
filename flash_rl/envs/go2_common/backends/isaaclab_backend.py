@@ -137,6 +137,7 @@ class IsaacLabSimBackend:
         self.debug = debug
         self._sim_dt = sim_dt
         self._enable_camera = enable_camera
+        self._show_viewer = show_viewer
         self._camera = None
 
         self.asset_source = asset_source
@@ -553,6 +554,30 @@ class IsaacLabSimBackend:
         view.set_coms(coms, idx_cpu)
 
     # --------------------------------------------------------------- render
+
+    def update_viewer(self, track_pos: Optional[torch.Tensor] = None) -> None:
+        """Repaint the interactive viewer and pump the Omniverse UI event loop.
+
+        ``step()`` advances physics with ``render=False``, and ``render()`` below draws only
+        when a *recording* camera exists. So with ``show_viewer=True`` and
+        ``enable_camera=False`` nothing ever calls ``SimulationContext.render()`` -- and
+        that is the call that runs ``app.update()``. Without it the window never repaints
+        and the window manager reports it as unresponsive (it looks like a black, dead
+        window that cannot be closed).
+
+        Called once per *control* step, not per physics substep: rendering all four
+        substeps would cost 4x for no visible benefit at 50 Hz.
+        """
+        if not self._show_viewer:
+            return
+        if track_pos is not None:
+            base = (track_pos.to(self.device) + self.env_origins[0]).tolist()
+            # Chase framing: behind, to the left and above, looking at the base.
+            self.sim.set_camera_view(
+                (base[0] - 1.5, base[1] - 1.5, base[2] + 0.8),
+                (base[0], base[1], base[2]),
+            )
+        self.sim.render()
 
     def render(self, track_pos: Optional[torch.Tensor] = None) -> Any:
         """Return one 320x320 RGB frame of env 0, or ``None`` if no camera is attached.

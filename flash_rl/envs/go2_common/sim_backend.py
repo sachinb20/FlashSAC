@@ -185,6 +185,10 @@ class Go2SimBackend(Protocol):
 
     # --------------------------------------------------------------- render
 
+    def update_viewer(self, track_pos: Optional[torch.Tensor] = None) -> None:
+        """Repaint an interactive viewer, if one is attached. No-op when headless."""
+        ...
+
     def render(self, track_pos: Optional[torch.Tensor] = None) -> Any:
         """RGB frame of env 0, or ``None`` if the backend has no camera."""
         ...

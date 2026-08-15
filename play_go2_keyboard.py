@@ -177,6 +177,16 @@ def play(args: argparse.Namespace) -> None:
     cfg = hydra.compose(config_name=args.config_name, overrides=args.overrides)
     OmegaConf.resolve(cfg)
 
+    # CUDA graphs cannot coexist with Isaac Sim in one process: they demand strict
+    # accounting of every allocation in their memory pool, and Isaac's own CUDA
+    # allocations land there unaccounted, so the first policy forward dies with
+    #   "These live storage data ptrs are in the cudagraph pool but not accounted for"
+    # The config default 'auto' resolves to 'max-autotune' on torch >= 2.9 and to
+    # 'reduce-overhead' below it -- *both* force graphs on, so neither is safe here.
+    # Overriding after compose rather than asking the caller to remember a flag.
+    cfg.agent.compile_mode = args.compile_mode
+    print(f"[play] agent.compile_mode = {args.compile_mode}")
+
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
@@ -243,6 +253,10 @@ def play(args: argparse.Namespace) -> None:
             observations, _, _, _, _ = env.step(np.array(actions))
             prev_transition = {"next_observation": observations}
 
+            # Repaint and pump the Omniverse UI. Physics steps with render=False, so
+            # without this the window never redraws and the WM reports it unresponsive.
+            base_env.sim.update_viewer(base_env.base_pos[0])
+
             step += 1
             if args.print_every > 0 and step % args.print_every == 0:
                 c = held["command"]
@@ -282,6 +296,13 @@ if __name__ == "__main__":
     parser.add_argument("--yaw_right_key", type=str, default="w", help="Key that yaws right (-wz)")
     parser.add_argument("--key_step", type=float, default=0.25, help="Command increment per keypress")
     parser.add_argument("--print_every", type=int, default=50, help="Print commanded vs measured every N steps (0=off)")
+    parser.add_argument(
+        "--compile_mode",
+        type=str,
+        default="max-autotune-no-cudagraphs",
+        help="Overrides agent.compile_mode. Must not enable CUDA graphs -- Isaac Sim shares the "
+        "process and its allocations break cudagraph accounting. 'default' disables autotuning too.",
+    )
     parser.add_argument("--headless", action="store_true", help="No viewer window (for checking it runs)")
     parser.add_argument("--free_run", action="store_true", help="Do not pace to wall clock")
     args = parser.parse_args()

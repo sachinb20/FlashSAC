@@ -273,6 +273,10 @@ class GenesisSimBackend:
             GUI=False,
         )
 
+    def update_viewer(self, track_pos: Optional[torch.Tensor] = None) -> None:
+        """No-op: Genesis repaints its own viewer inside ``scene.step()``."""
+        return
+
     def render(self, track_pos: Optional[torch.Tensor] = None) -> Any:
         robot_pos = np.array(track_pos.cpu()) if track_pos is not None else np.zeros(3)
         self._floating_camera.set_pose(
