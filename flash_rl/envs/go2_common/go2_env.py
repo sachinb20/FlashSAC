@@ -22,6 +22,7 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
+from .actuators import ACTUATOR_EXPLICIT_PD, ACTUATOR_MODELS, clip_effort
 from .math_utils import (
     TC_FLOAT,
     TC_INT,
@@ -111,6 +112,8 @@ class Go2BaseEnv:
             sim_dt=sim_dt,
             control_dt=self.dt,
             urdf_path=self.env_cfg["urdf_path"],
+            asset_source=self.env_cfg.get("asset_source", "genesis_merged"),
+            ground_material=self.env_cfg.get("ground_material", "isaaclab_default"),
             links_to_keep=self.env_cfg["links_to_keep"],
             base_init_pos=self.base_init_pos,
             base_init_quat=self.base_init_quat,
@@ -322,7 +325,11 @@ class Go2BaseEnv:
             self.batched_p_gains * (actions_scaled + self.default_dof_pos - self.dof_pos + self.motor_offsets)
             - self.batched_d_gains * self.dof_vel
         )
-        return torques * self.motor_strengths
+        torques = torques * self.motor_strengths
+        # Torque-speed ceiling. Genesis enforces none, so the default is a no-op; the
+        # go2hv envelope is what TDMPC2 runs. Applied after motor_strengths, matching
+        # MotorStrengthUnitreeActuator.compute, which scales before it clips.
+        return clip_effort(self.env_cfg.get("actuator_model", ACTUATOR_EXPLICIT_PD), torques, self.dof_vel)
 
     def check_termination(self) -> None:
         self.reset_buf = torch.any(
@@ -715,6 +722,11 @@ def get_cfgs() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str
     """
     env_cfg = {
         "urdf_path": "urdf/go2/urdf/go2.urdf",
+        # Which robot description to load. See go2_urdf.py for the full diff between the
+        # two -- they are not the same robot (7% mass, thigh collision box, knee gear
+        # ratio). 'genesis_merged' is the reference; 'unitree_urdf' is what TDMPC2 trains
+        # against and is rung 1 of the port.
+        "asset_source": "genesis_merged",
         "links_to_keep": [
             "FL_foot",
             "FR_foot",
@@ -752,14 +764,32 @@ def get_cfgs() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str
             "RL_thigh_joint",
             "RL_calf_joint",
         ],
+        # Full-match regexes, not substrings. On the merged 17-link asset these select
+        # exactly what the old substring lists did (1 / 9 / 4 bodies). They are written as
+        # patterns because the upstream Unitree asset keeps the ``*_rotor`` links, where
+        # bare "calf"/"thigh" would also match ``FL_calf_rotor``/``FL_thigh_rotor`` and
+        # quietly grow the penalised set from 9 bodies to 17. Same patterns TDMPC2 uses.
         "termination_contact_link_names": ["base"],
-        "penalized_contact_link_names": ["base", "thigh", "calf"],
-        "feet_link_names": ["foot"],
+        "penalized_contact_link_names": ["base", ".*_thigh", ".*_calf"],
+        "feet_link_names": [".*_foot"],
         "base_link_name": ["base"],
-        # PD
+        # PD. Genesis uses 30/1.5; TDMPC2 inherits 25/0.5 from UNITREE_GO2_CFG's DCMotorCfg
+        # (its _make_unitree_go2hv_actuator_cfg copies stiffness/damping straight off it,
+        # so swapping to the go2hv actuator does NOT change the gains).
         "PD_stiffness": {"joint": 30.0},
         "PD_damping": {"joint": 1.5},
         "use_implicit_controller": False,
+        # Torque-speed ceiling on the computed PD torque.
+        #   explicit_pd_unclipped  no ceiling at all -- the Genesis behaviour
+        #   dc_motor               IsaacLab DCMotor line (23.5 N.m, 30 rad/s no-load)
+        #   unitree_go2hv          Unitree's measured envelope -- what TDMPC2 runs
+        "actuator_model": "explicit_pd_unclipped",
+        # Ground contact material (IsaacLab backend only).
+        #   isaaclab_default  static/dynamic 0.5, combine "average"  -- GroundPlaneCfg's own defaults
+        #   tdmpc2            static/dynamic 1.0, combine "multiply" -- TDMPC2's TerrainImporterCfg
+        # See _ground_material_cfg() in the IsaacLab backend for why the combine mode is
+        # the load-bearing half of this.
+        "ground_material": "isaaclab_default",
         # Rotor inertia added to every DoF. NOT in the URDF (it declares no <dynamics> at
         # all) -- this is Genesis's *solver default*, which the original env never had to
         # name. It is load-bearing: the calf link's own inertia about the knee is only
@@ -767,6 +797,11 @@ def get_cfgs() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str
         # PD is past its stability limit at this timestep (Kd*dt/I = 2.5 > 2) and the legs
         # ring at +/-10 rad/s. PhysX defaults armature to 0, so the IsaacLab backend must
         # set it. Stated here so the two engines cannot silently disagree again.
+        #
+        # TDMPC2 runs armature 0 (its cfg leaves the field None and the URDF has no
+        # <dynamics>). That is only safe because its Kd is 0.5, giving Kd*dt/I = 0.83 --
+        # inside the stability limit of 2. At Genesis's Kd=1.5 it would be 2.5. So this and
+        # PD_damping MUST move together: never set this to 0 while damping is still 1.5.
         "dof_armature": 0.1,
         # termination
         "termination_if_roll_greater_than": 0.4,
@@ -859,8 +894,67 @@ def get_env(
     eval_mode: bool,
     sim_backend: str = "genesis",
     enable_camera: bool = False,
+    asset_source: Optional[str] = None,
+    actuator_model: Optional[str] = None,
+    ground_material: Optional[str] = None,
+    pd_stiffness: Optional[float] = None,
+    pd_damping: Optional[float] = None,
+    dof_armature: Optional[float] = None,
 ) -> Go2WalkEnv:
     env_cfg, obs_cfg, reward_cfg, command_cfg = get_cfgs()
+    if asset_source is not None:
+        env_cfg["asset_source"] = asset_source
+    if ground_material is not None:
+        if ground_material not in ("isaaclab_default", "tdmpc2"):
+            raise ValueError(f"Unknown ground_material {ground_material!r}, expected 'isaaclab_default' or 'tdmpc2'.")
+        env_cfg["ground_material"] = ground_material
+    if actuator_model is not None:
+        if actuator_model not in ACTUATOR_MODELS:
+            raise ValueError(f"Unknown actuator_model {actuator_model!r}, expected one of {ACTUATOR_MODELS}.")
+        env_cfg["actuator_model"] = actuator_model
+    if pd_stiffness is not None:
+        env_cfg["PD_stiffness"] = {"joint": float(pd_stiffness)}
+    if pd_damping is not None:
+        env_cfg["PD_damping"] = {"joint": float(pd_damping)}
+    if dof_armature is not None:
+        env_cfg["dof_armature"] = float(dof_armature)
+
+    # The explicit PD is integrated at sim_dt, so it goes unstable once Kd*dt exceeds
+    # roughly 2x the effective joint inertia. The calf is the binding joint at ~0.003
+    # kg.m^2 about the knee, and armature adds to that directly. Genesis hides this by
+    # defaulting armature to 0.1; PhysX defaults it to 0, where Kd=1.5 gives a ratio of
+    # 2.5 and the legs ring at +/-10 rad/s even in free fall. Catch the combination here
+    # rather than after a wasted run.
+    sim_dt = 1.0 / (env_cfg["control_freq"] * env_cfg["decimation"])
+    calf_inertia_about_knee = 0.003
+    ratio = env_cfg["PD_damping"]["joint"] * sim_dt / (calf_inertia_about_knee + env_cfg["dof_armature"])
+    if ratio > 2.0:
+        raise ValueError(
+            f"Explicit PD is unstable for this combination: Kd*dt/I = {ratio:.2f} > 2 "
+            f"(PD_damping={env_cfg['PD_damping']['joint']}, dof_armature={env_cfg['dof_armature']}, "
+            f"sim_dt={sim_dt}). Lower the damping or raise the armature; TDMPC2's pairing is "
+            "damping 0.5 with armature 0."
+        )
+
+    # The ratio above is necessary but NOT sufficient. Measured on the go2-walk task with
+    # random actions, armature 0 (ratio 0.83, nominally "stable") still lets peak joint
+    # velocity go 16.9 -> 48.3 rad/s, and with the go2hv envelope on top, 115 rad/s with
+    # 3.7% of joint-steps above the motor's 30 rad/s no-load speed -- where the envelope
+    # caps torque at exactly zero, the leg goes limp, and the robot tips into the 0.4 rad
+    # termination. A 50M run collapsed to 4-step episodes this way.
+    #
+    # TDMPC2 gets away with armature 0 because of config we have not ported yet: it
+    # disables termination entirely, spawns in a crouched stance 13 cm lower, and commands
+    # gentler velocities. Armature is therefore NOT an independent axis -- it has to move
+    # together with those. Warn rather than raise, since the combination is legitimate
+    # once they land.
+    if env_cfg["dof_armature"] < 0.05 and env_cfg["termination_if_pitch_greater_than"] > 0:
+        print(
+            f"[go2] WARNING: dof_armature={env_cfg['dof_armature']} with tilt termination still enabled. "
+            "Armature 0 drives joint velocities past the motor's 30 rad/s no-load speed, where the "
+            "torque envelope goes to zero; on this task that collapsed training to 4-step episodes. "
+            "TDMPC2 pairs armature 0 with enable_termination=false and its crouched stance."
+        )
     return Go2WalkEnv(
         num_envs=num_envs,
         env_cfg=env_cfg,

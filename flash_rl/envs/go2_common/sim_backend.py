@@ -27,9 +27,29 @@ asymmetry is inherited from the Genesis env and is deliberately preserved.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional, Protocol, Sequence
 
 import torch
+
+
+def resolve_link_indices_by_pattern(body_names: Sequence[str], name_patterns: Sequence[str]) -> list[int]:
+    """Link indices whose name fully matches any of ``name_patterns`` (regex), in body order.
+
+    This was substring matching, which is what Genesis's ``find_link_indices`` does. That
+    is safe only on the pre-merged 17-link asset, where no body name is a prefix of
+    another. It is *not* safe in general: under Isaac Sim 5.1 the URDF importer merges a
+    fixed-joint child only when it has no mass, so the upstream Unitree description keeps
+    31 bodies including twelve ``*_rotor`` links. There, ``"calf"`` also matches
+    ``FL_calf_rotor`` and ``"thigh"`` matches ``FL_thigh_rotor``, and the penalised-contact
+    set silently grows from 9 bodies to 17.
+
+    Full-match regex is what TDMPC2 uses (``find_bodies(".*_foot")``) and it gives
+    identical results to the old substring behaviour on the merged asset, provided the
+    patterns are written as regexes -- see ``get_cfgs()``.
+    """
+    compiled = [re.compile(p) for p in name_patterns]
+    return [i for i, name in enumerate(body_names) if any(p.fullmatch(name) for p in compiled)]
 
 
 class Go2SimBackend(Protocol):

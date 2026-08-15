@@ -23,6 +23,7 @@ import torch
 from genesis.engine.solvers.rigid.rigid_solver_decomp import RigidSolver
 
 from ..go2_urdf import get_merged_urdf
+from ..sim_backend import resolve_link_indices_by_pattern
 
 
 class GenesisSimBackend:
@@ -42,7 +43,25 @@ class GenesisSimBackend:
         default_joint_angles: Optional[dict[str, float]] = None,
         dof_armature: float = 0.1,
         enable_camera: bool = True,
+        asset_source: str = "genesis_merged",
+        ground_material: str = "isaaclab_default",
     ) -> None:
+        # The upstream Unitree description is a PhysX-side port step; it has never been
+        # run on Genesis and its topology (rotor links, unmerged calflower chain) would
+        # silently change which bodies the substring contact matching selects. Refuse
+        # rather than run a robot nobody asked for.
+        # Genesis's ground is its own plane.urdf with Genesis's solver defaults; it has
+        # no PhysX-style per-material combine mode, so the preset cannot be honoured here.
+        if ground_material != "isaaclab_default":
+            raise ValueError(
+                f"The Genesis backend cannot set ground_material={ground_material!r}; its ground is "
+                "plane.urdf under the Genesis solver. Use sim_backend='isaaclab'."
+            )
+        if asset_source != "genesis_merged":
+            raise ValueError(
+                f"The Genesis backend supports asset_source='genesis_merged' only, got {asset_source!r}. "
+                "Use sim_backend='isaaclab' for the upstream Unitree description."
+            )
         # Genesis already defaults every DoF to 0.1, so writing it is a no-op here -- but
         # it is written anyway so the value is explicit and identical on both backends.
         self._dof_armature = dof_armature
@@ -121,12 +140,10 @@ class GenesisSimBackend:
         self._motor_dofs = [self.robot.get_joint(name).dof_idx_local for name in dof_names]
         return self._motor_dofs
 
-    def resolve_link_indices(self, name_substrings: Sequence[str]) -> list[int]:
-        indices = []
-        for link in self.robot.links:
-            if any(name in link.name for name in name_substrings):
-                indices.append(link.idx - self._link_offset)
-        return indices
+    def resolve_link_indices(self, name_patterns: Sequence[str]) -> list[int]:
+        names = [link.name for link in self.robot.links]
+        offsets = [link.idx - self._link_offset for link in self.robot.links]
+        return [offsets[i] for i in resolve_link_indices_by_pattern(names, name_patterns)]
 
     def get_dof_pos_limits(self, dof_indices: Sequence[int]) -> torch.Tensor:
         return torch.stack(self.robot.get_dofs_limit(dof_indices), dim=1)

@@ -166,6 +166,12 @@ models/**
 # Go2 asset vendored out of the Genesis package by scripts/vendor_go2_asset.py,
 # plus the pre-merged URDF derived from it. Both are regenerated, not authored.
 assets/go2_genesis/
+# The upstream Unitree URDF in assets/go2_unitree/urdf/ IS committed (27 KB, and not
+# derivable from anything installed). Only the staged rewrite is regenerated.
+assets/go2_unitree/staged/
+# Reference checkout of the TDMPC2 fork we are porting the Go2 environment from. It is a
+# separate git repo (153 MB) and must never be committed into this one.
+TDMPC2_isaaclab/
 # smoke-test render output
 smoke_frame_*.png
 smoke_frame_*.npy

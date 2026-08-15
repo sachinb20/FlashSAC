@@ -172,6 +172,12 @@ def create_envs(
             eval_mode=False,
             sim_backend=kwargs["sim_backend"],
             enable_camera=kwargs.get("enable_camera", False),
+            asset_source=kwargs.get("asset_source"),
+            actuator_model=kwargs.get("actuator_model"),
+            ground_material=kwargs.get("ground_material"),
+            pd_stiffness=kwargs.get("pd_stiffness"),
+            pd_damping=kwargs.get("pd_damping"),
+            dof_armature=kwargs.get("dof_armature"),
         )
         # One simulator instance per process on both backends.
         eval_env = train_env

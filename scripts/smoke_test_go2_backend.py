@@ -29,17 +29,45 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
+# Body *counts* differ by asset; the contact index *sets* must not. The upstream Unitree
+# description imports to 31 bodies rather than 17 because Isaac Sim 5.1 only merges
+# fixed-joint children that carry no mass, so the twelve 0.089 kg rotor links and the two
+# 0.001 kg head links survive. The 1 / 9 / 4 contact sets are the invariant.
 EXPECTED = {
-    "n_links": 17,
-    "n_termination": 1,
-    "n_penalized": 9,
-    "n_feet": 4,
+    "genesis_merged": {"n_links": 17, "n_termination": 1, "n_penalized": 9, "n_feet": 4},
+    "unitree_urdf": {"n_links": 31, "n_termination": 1, "n_penalized": 9, "n_feet": 4},
 }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=["genesis", "isaaclab"], required=True)
+    parser.add_argument(
+        "--asset-source",
+        choices=["genesis_merged", "unitree_urdf"],
+        default="genesis_merged",
+        help="Robot description. 'unitree_urdf' is what TDMPC2 trains against (isaaclab only).",
+    )
+    parser.add_argument(
+        "--ground-material",
+        choices=["isaaclab_default", "tdmpc2"],
+        default=None,
+        help="Ground contact material. TDMPC2 uses 1.0/1.0 with combine=multiply.",
+    )
+    parser.add_argument(
+        "--actuator-model",
+        choices=["explicit_pd_unclipped", "dc_motor", "unitree_go2hv"],
+        default=None,
+        help="Torque-speed ceiling on the PD torque. TDMPC2 runs unitree_go2hv.",
+    )
+    parser.add_argument("--pd-stiffness", type=float, default=None, help="Genesis 30.0, TDMPC2 25.0")
+    parser.add_argument("--pd-damping", type=float, default=None, help="Genesis 1.5, TDMPC2 0.5")
+    parser.add_argument(
+        "--dof-armature",
+        type=float,
+        default=None,
+        help="Genesis 0.1, TDMPC2 0.0. Coupled to --pd-damping; see get_env().",
+    )
     parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument("--steps", type=int, default=30)
     parser.add_argument("--seed", type=int, default=0)
@@ -68,9 +96,19 @@ def main() -> int:
         eval_mode=True,
         sim_backend=args.backend,
         enable_camera=args.camera,
+        asset_source=args.asset_source,
+        actuator_model=args.actuator_model,
+        ground_material=args.ground_material,
+        pd_stiffness=args.pd_stiffness,
+        pd_damping=args.pd_damping,
+        dof_armature=args.dof_armature,
     )
 
-    print(f"\n=== {args.backend} backend bring-up ===")
+    print(f"\n=== {args.backend} backend bring-up (asset={args.asset_source}) ===")
+    print("actuator_model    :", env.env_cfg["actuator_model"])
+    print("PD kp/kd          :", env.env_cfg["PD_stiffness"]["joint"], "/", env.env_cfg["PD_damping"]["joint"])
+    print("dof_armature      :", env.env_cfg["dof_armature"])
+    print("ground_material   :", env.env_cfg["ground_material"])
     print("n_links           :", env.sim.n_links)
     print("motor_dofs        :", env.motor_dofs)
     print("termination_links :", env.termination_contact_link_indices)
@@ -180,14 +218,15 @@ def main() -> int:
             np.save(out, img)
         print("  saved frame     :", os.path.abspath(out))
 
+    expected = EXPECTED[args.asset_source]
     problems = []
-    if env.sim.n_links != EXPECTED["n_links"]:
-        problems.append(f"n_links {env.sim.n_links} != {EXPECTED['n_links']}")
-    if len(env.termination_contact_link_indices) != EXPECTED["n_termination"]:
+    if env.sim.n_links != expected["n_links"]:
+        problems.append(f"n_links {env.sim.n_links} != {expected['n_links']}")
+    if len(env.termination_contact_link_indices) != expected["n_termination"]:
         problems.append(f"termination links: {env.termination_contact_link_indices}")
-    if len(env.penalized_contact_link_indices) != EXPECTED["n_penalized"]:
+    if len(env.penalized_contact_link_indices) != expected["n_penalized"]:
         problems.append(f"penalized links: {env.penalized_contact_link_indices} (expected 9)")
-    if len(env.feet_link_indices) != EXPECTED["n_feet"]:
+    if len(env.feet_link_indices) != expected["n_feet"]:
         problems.append(f"feet links: {env.feet_link_indices} (expected 4)")
     if not torch.isfinite(obs).all():
         problems.append("non-finite observations")

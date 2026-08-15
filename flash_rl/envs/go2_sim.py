@@ -186,6 +186,12 @@ def make_go2_env(
     eval_mode: bool,
     sim_backend: str,
     enable_camera: bool = False,
+    asset_source: Optional[str] = None,
+    actuator_model: Optional[str] = None,
+    ground_material: Optional[str] = None,
+    pd_stiffness: Optional[float] = None,
+    pd_damping: Optional[float] = None,
+    dof_armature: Optional[float] = None,
 ) -> VectorEnv[NDArray, NDArray, NDArray]:
     from .go2_common.go2_env import get_env
 
@@ -197,5 +203,11 @@ def make_go2_env(
         eval_mode=eval_mode,
         sim_backend=sim_backend,
         enable_camera=enable_camera,
+        asset_source=asset_source,
+        actuator_model=actuator_model,
+        ground_material=ground_material,
+        pd_stiffness=pd_stiffness,
+        pd_damping=pd_damping,
+        dof_armature=dof_armature,
     )
     return Go2VectorEnv(env, rescale_action=rescale_action, to_numpy=True)

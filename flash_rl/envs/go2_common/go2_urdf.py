@@ -56,6 +56,36 @@ GENESIS_REFERENCE_TOPOLOGY = {
 
 GO2_LINKS_TO_KEEP = ("FL_foot", "FR_foot", "RL_foot", "RR_foot")
 
+# ---------------------------------------------------------------------- asset sources
+#
+# Two robot descriptions, both descended from unitreerobotics' ``go2_description``:
+#
+# ``genesis_merged``  Genesis's bundled ``go2.urdf``, pre-merged to 17 links here.
+# ``unitree_urdf``    The upstream file, which is what TDMPC2 trains against.
+#
+# They are not the same robot. Diffed link by link, they differ in exactly three ways
+# (the other 25 links match to 1e-12 on mass, COM, inertia and collision geometry):
+#
+#   * upstream keeps 12 ``*_rotor`` links (0.089 kg each) and ``front_camera``;
+#     Genesis deleted them, so its robot is 15.019 kg against upstream's 16.087 (-7.1%),
+#     concentrated in the hips (-13.1%) and thighs (-7.7%).
+#   * thigh collision box: Genesis ships Unitree's shortened "amended" 0.11 m box, which
+#     their README recommends to avoid spurious thigh/calf self-collision; upstream is
+#     the stock 0.213 m. TDMPC2 runs the long box *with* self-collisions enabled.
+#   * calf joint limits imply different knee reductions: Genesis 35.55 N.m / 20.07 rad/s
+#     is 23.7 x 1.5, upstream 45.43 / 15.7 is 23.7 x 1.9169. Unitree spec the knee at
+#     45.43, so the Genesis asset understates knee torque by 22%. Inert while no torque
+#     ceiling is enforced; live as soon as a real actuator model lands.
+#
+# The visual meshes are byte-identical between the two (verified by md5 over all seven
+# ``.dae`` files), so the vendored upstream asset is the 27 KB URDF alone and it borrows
+# the mesh directory the Genesis vendoring step already produced.
+ASSET_SOURCE_GENESIS_MERGED = "genesis_merged"
+ASSET_SOURCE_UNITREE_URDF = "unitree_urdf"
+ASSET_SOURCES = (ASSET_SOURCE_GENESIS_MERGED, ASSET_SOURCE_UNITREE_URDF)
+
+UNITREE_URDF_NAME = "go2_description.urdf"
+
 
 # --------------------------------------------------------------------------- transforms
 
@@ -317,6 +347,80 @@ def vendor_asset(urdf_path: str = "urdf/go2/urdf/go2.urdf") -> str:
     if os.path.isdir(src_dae) and not os.path.isdir(dst_dae):
         shutil.copytree(src_dae, dst_dae)
     return dst_urdf
+
+
+def unitree_asset_dir() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "assets", "go2_unitree")
+
+
+def resolve_unitree_urdf() -> str:
+    """Locate the vendored upstream ``go2_description.urdf``.
+
+    Order: ``FLASHSAC_GO2_UNITREE_URDF`` override, then ``assets/go2_unitree/urdf/``,
+    then a sibling ``TDMPC2_isaaclab/`` checkout if one happens to be present.
+    """
+    override = os.environ.get("FLASHSAC_GO2_UNITREE_URDF")
+    if override:
+        if not os.path.isfile(override):
+            raise FileNotFoundError(f"FLASHSAC_GO2_UNITREE_URDF={override!r} does not exist.")
+        return override
+
+    vendored = os.path.normpath(os.path.join(unitree_asset_dir(), "urdf", UNITREE_URDF_NAME))
+    if os.path.isfile(vendored):
+        return vendored
+
+    repo_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
+    tdmpc2 = os.path.normpath(
+        os.path.join(repo_root, "TDMPC2_isaaclab", "tdmpc2", "assets", "go2_description", "urdf", UNITREE_URDF_NAME)
+    )
+    if os.path.isfile(tdmpc2):
+        return tdmpc2
+
+    raise FileNotFoundError(
+        f"Could not find the upstream Go2 URDF. Expected it at {vendored!r}. "
+        "It is vendored in the repo; if it is missing, copy it from a TDMPC2_isaaclab "
+        "checkout (tdmpc2/assets/go2_description/urdf/) or set FLASHSAC_GO2_UNITREE_URDF."
+    )
+
+
+def get_staged_unitree_urdf(urdf_path: str = "urdf/go2/urdf/go2.urdf") -> str:
+    """Return a loadable path to the upstream URDF, staged beside its meshes.
+
+    The upstream file addresses meshes as ``package://go2_description/dae/*.dae``, which
+    only resolves under a ROS environment. Isaac's importer wants a plain relative path,
+    so the URDF is rewritten with the prefix stripped into a staging directory holding a
+    ``dae`` symlink. This mirrors what TDMPC2 does in ``stage_go2_urdf_for_isaaclab``.
+
+    The meshes are byte-identical to the Genesis ones, so the symlink points at the
+    directory ``vendor_asset()`` already populated rather than duplicating 25 MB. That
+    makes the Genesis vendoring step a prerequisite for *both* asset sources.
+    """
+    src = resolve_unitree_urdf()
+    staged_dir = os.path.normpath(os.path.join(unitree_asset_dir(), "staged"))
+    os.makedirs(staged_dir, exist_ok=True)
+
+    dae_src = os.path.normpath(os.path.join(repo_asset_dir(), "dae"))
+    if not os.path.isdir(dae_src):
+        # vendor_asset() only copies the meshes; it is cheap and idempotent.
+        vendor_asset(urdf_path)
+    if not os.path.isdir(dae_src):
+        raise FileNotFoundError(
+            f"Go2 visual meshes not found at {dae_src!r}. Run `python scripts/vendor_go2_asset.py` "
+            "from the Genesis venv first -- both asset sources share that mesh directory."
+        )
+
+    dae_link = os.path.join(staged_dir, "dae")
+    if os.path.islink(dae_link) or os.path.isfile(dae_link):
+        os.unlink(dae_link)
+    elif os.path.isdir(dae_link):
+        shutil.rmtree(dae_link)
+    os.symlink(dae_src, dae_link, target_is_directory=True)
+
+    dst = os.path.join(staged_dir, UNITREE_URDF_NAME)
+    text = open(src, encoding="utf-8").read().replace("package://go2_description/", "")
+    with open(dst, "w", encoding="utf-8") as f:
+        f.write(text)
+    return dst
 
 
 def get_merged_urdf(urdf_path: str, links_to_keep: Sequence[str] = GO2_LINKS_TO_KEEP, verify: bool = True) -> str:

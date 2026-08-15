@@ -17,6 +17,53 @@ env_name: 'go2-walk'
 sim_backend: 'genesis'
 num_env_steps: ${num_env_steps}
 
+# Which robot description to load (rung 1 of the TDMPC2 port).
+#
+#   genesis_merged  Genesis's go2.urdf, pre-merged to 17 links. 15.019 kg, shortened
+#                   0.11 m thigh collision box, knee limits implying a 1.5:1 reduction.
+#   unitree_urdf    Upstream unitreerobotics go2_description.urdf -- what TDMPC2 trains
+#                   against. 16.087 kg (keeps the 12 rotor links), stock 0.213 m thigh
+#                   box, knee limits implying 1.9169:1.
+#
+# These are NOT the same robot; see flash_rl/envs/go2_common/go2_urdf.py for the diff.
+# IsaacLab backend only -- the Genesis backend rejects anything but genesis_merged.
+asset_source: 'genesis_merged'
+
+# Actuator rung. `null` keeps the value baked into get_cfgs().
+#
+#   actuator_model  explicit_pd_unclipped -> no torque ceiling (Genesis behaviour)
+#                   dc_motor              -> IsaacLab DCMotor line, 23.5 N.m / 30 rad/s
+#                   unitree_go2hv         -> Unitree's envelope, what TDMPC2 runs
+#                                            (flat 20.2/23.4 N.m to 13.5 rad/s, then
+#                                             linear to zero at 30 rad/s)
+#   pd_stiffness    Genesis 30.0  |  TDMPC2 25.0 (inherited from UNITREE_GO2_CFG)
+#   pd_damping      Genesis  1.5  |  TDMPC2  0.5
+#   dof_armature    Genesis  0.1  |  TDMPC2  0.0
+#
+# pd_damping and dof_armature are COUPLED and must move together: the explicit PD is
+# integrated at sim_dt and goes unstable once Kd*dt/I exceeds ~2, where I is the calf's
+# ~0.003 kg.m^2 about the knee plus the armature. Genesis's 1.5/0.1 gives 0.07; TDMPC2's
+# 0.5/0.0 gives 0.83; but 1.5/0.0 gives 2.5 and the legs ring at +/-10 rad/s even in free
+# fall. get_env() raises on the bad combination rather than letting it burn a run.
+actuator_model: null
+pd_stiffness: null
+pd_damping: null
+dof_armature: null
+
+# Ground contact material (IsaacLab backend only).
+#
+#   isaaclab_default  static/dynamic 0.5, combine "average"  -- GroundPlaneCfg defaults
+#   tdmpc2            static/dynamic 1.0, combine "multiply" -- TDMPC2's TerrainImporterCfg
+#
+# The combine mode matters more than the coefficients. PhysX gives every collider its own
+# material, so a foot/ground contact has two friction values and must reduce them to one.
+# "average" pulls the result toward the ground's 0.5 and halves the robot's contribution;
+# "multiply" against a ground of exactly 1.0 returns the robot's own value untouched, so
+# the friction randomisation reaches the contact undiluted. Setting it on the ground alone
+# suffices -- PhysX resolves a mode disagreement by priority (average < min < multiply <
+# max), so "multiply" wins over whatever the URDF import left on the robot.
+ground_material: null
+
 # Video recording. Genesis always attaches its floating camera, so this only gates the
 # IsaacLab backend, where turning the renderer on costs training throughput. Set true
 # whenever num_record_episodes > 0, otherwise record_video() gets no frames.

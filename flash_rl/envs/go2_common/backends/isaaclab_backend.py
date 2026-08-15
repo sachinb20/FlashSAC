@@ -6,8 +6,14 @@ that already exists in ``go2_env.py`` and is shared with the Genesis arm. What l
 is a ``SimulationContext``, an ``Articulation``, a ``ContactSensor``, and the index and
 frame translation needed to make PhysX answer the same questions Genesis answers.
 
-Loads the same pre-merged URDF as the Genesis backend (see ``go2_urdf.py``), with
-``merge_fixed_joints=False`` so PhysX keeps exactly the 17 links Genesis produces.
+Two robot descriptions are selectable via ``asset_source`` (see ``go2_urdf.py``):
+
+``genesis_merged``  the pre-merged URDF the Genesis backend loads, with
+                    ``merge_fixed_joints=False`` so PhysX keeps exactly the 17 links
+                    Genesis produces. 15.019 kg.
+``unitree_urdf``    the upstream Unitree description TDMPC2 trains against, spawned with
+                    TDMPC2's own settings. Imports to 31 bodies / 16.087 kg. Rung 1 of
+                    the port; not yet paired with TDMPC2's actuator or rewards.
 
 Torque control: the actuator is configured with zero stiffness and damping and an
 effectively unbounded effort limit, so ``set_joint_effort_target`` writes the torque the
@@ -18,9 +24,9 @@ Written against IsaacLab 2.3 (the ``python_version == '3.11'`` pin in ``pyprojec
 IsaacLab's converter API moved between 2.1 and 2.3; ``_build_urdf_spawn_cfg`` handles both
 shapes and raises a legible error rather than a stray ``TypeError`` if it meets a third.
 
-UNTESTED IN THIS REPO: IsaacLab is not installable in the Genesis virtualenv
-(``pyproject.toml`` declares the extras mutually exclusive), so nothing here has been
-executed. Treat first run as bring-up. See ``GO2_SIM_BACKEND.md``.
+Runs in ``.venv-isaaclab`` against isaacsim 5.1.0.0; it cannot be exercised from the
+Genesis virtualenv (``pyproject.toml`` declares the extras mutually exclusive). See
+``GO2_SIM_BACKEND.md``.
 """
 
 from __future__ import annotations
@@ -29,9 +35,52 @@ from typing import Any, Optional, Sequence
 
 import torch
 
-from ..go2_urdf import get_merged_urdf
+from ..go2_urdf import get_merged_urdf, get_staged_unitree_urdf
+from ..sim_backend import resolve_link_indices_by_pattern
 
 _SIM_APP = None
+
+GROUND_MATERIALS = ("isaaclab_default", "tdmpc2")
+
+
+def _ground_material_cfg(sim_utils: Any, ground_material: str) -> Any:
+    """Contact material for the ground plane.
+
+    Two presets:
+
+    ``isaaclab_default``  static/dynamic 0.5, combine ``"average"`` -- what a bare
+                          ``GroundPlaneCfg()`` gives you.
+    ``tdmpc2``            static/dynamic 1.0, combine ``"multiply"`` -- the material
+                          TDMPC2 hands to its ``TerrainImporterCfg``.
+
+    The **combine mode** is the load-bearing half. PhysX gives each collider its own
+    material, so a robot-foot/ground contact has two friction values and must reduce them
+    to one; the mode decides how. Under ``average`` the ground drags the result toward its
+    own 0.5 and the foot only ever contributes half. Under ``multiply`` against a ground of
+    exactly 1.0 the product is the foot's own coefficient, so the ground becomes
+    transparent and the robot's material alone sets the contact -- which is what makes
+    TDMPC2's friction randomisation land on the contact undiluted.
+
+    That difference is not symmetric between the two arms and is not merely a scale factor:
+    with our friction DR the robot's material is a random draw, and ``(x + 0.5)/2`` is a
+    different distribution from ``x`` in both mean and spread.
+
+    Setting it on the ground alone is sufficient. When two colliding materials disagree on
+    the combine mode PhysX takes the higher-priority one (``PxCombineMode`` order
+    average < min < multiply < max), so ``multiply`` on the ground wins over ``average``
+    on the robot regardless of what the URDF import produced.
+    """
+    if ground_material not in GROUND_MATERIALS:
+        raise ValueError(f"Unknown ground_material {ground_material!r}, expected one of {GROUND_MATERIALS}.")
+    if ground_material == "tdmpc2":
+        return sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        )
+    return sim_utils.RigidBodyMaterialCfg()
 
 
 def _launch_app(headless: bool, enable_cameras: bool) -> Any:
@@ -66,7 +115,11 @@ class IsaacLabSimBackend:
         dof_armature: float = 0.1,
         enable_camera: bool = False,
         env_spacing: float = 4.0,
+        asset_source: str = "genesis_merged",
+        ground_material: str = "isaaclab_default",
     ) -> None:
+        if asset_source not in ("genesis_merged", "unitree_urdf"):
+            raise ValueError(f"Unknown asset_source {asset_source!r}, expected 'genesis_merged' or 'unitree_urdf'.")
         # enable_cameras must be decided at app launch, before any IsaacLab import.
         _launch_app(headless=not show_viewer, enable_cameras=show_viewer or enable_camera)
 
@@ -86,11 +139,15 @@ class IsaacLabSimBackend:
         self._enable_camera = enable_camera
         self._camera = None
 
-        merged_urdf = get_merged_urdf(urdf_path, links_to_keep)
+        self.asset_source = asset_source
+        if asset_source == "unitree_urdf":
+            asset_urdf = get_staged_unitree_urdf(urdf_path)
+        else:
+            asset_urdf = get_merged_urdf(urdf_path, links_to_keep)
 
         self.sim = SimulationContext(SimulationCfg(dt=sim_dt, device=str(device)))
 
-        spawn_cfg = self._build_urdf_spawn_cfg(sim_utils, merged_urdf)
+        spawn_cfg = self._build_urdf_spawn_cfg(sim_utils, asset_urdf, asset_source)
 
         robot_cfg = ArticulationCfg(
             prim_path="{ENV_REGEX_NS}/Robot",
@@ -123,27 +180,30 @@ class IsaacLabSimBackend:
 
         @configclass
         class _Go2SceneCfg(InteractiveSceneCfg):
-            ground = AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
+            ground = AssetBaseCfg(
+                prim_path="/World/ground",
+                spawn=sim_utils.GroundPlaneCfg(physics_material=_ground_material_cfg(sim_utils, ground_material)),
+            )
             # Lights. IsaacLab's InteractiveScene ships none, and without one the RTX
-            # renderer returns a near-black, colourless image -- recorded video comes out
-            # looking black and white. Genesis lights its scene by default, so the shared
-            # env never had to ask for this. Purely visual: lights are inert prims with no
-            # effect on physics, so this cannot perturb the dynamics comparison.
+            # renderer returns a near-black image. Purely visual: lights are inert prims
+            # with no effect on physics, so this cannot perturb the dynamics comparison.
             #
-            # A single dome, matching what the earlier isaaclab_go2 port used. Adding a
-            # second (distant) light on top washes the scene out: it lifts brightness
-            # without adding saturation, which reads as pale grey rather than lit.
+            # These are TDMPC2's exact values (its _setup_scene ends with
+            # DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))), so the two
+            # recordings are directly comparable.
             #
-            # visible_in_primary_ray defaults to True, which draws the dome itself as a
-            # blown-out white sky filling the frame. It is wanted as a light source, not as
-            # a backdrop, so it is hidden from camera rays here.
+            # The dome is deliberately left VISIBLE in primary rays. An earlier version
+            # hid it, reasoning that it wanted a light source and not a backdrop -- but
+            # the ground plane is solid black on both sides (IsaacLab's
+            # TerrainImporterCfg.visual_material defaults to diffuse_color=(0,0,0), which
+            # it forwards into GroundPlaneCfg's color, and GroundPlaneCfg's own default is
+            # the same black). With the dome hidden the sky is black too, so a black
+            # ground against a black sky is simply invisible: the recording showed a white
+            # robot floating in a void with no ground, horizon or contact shadow. The
+            # visible dome is what gives the ground something to read against.
             dome_light = AssetBaseCfg(
                 prim_path="/World/Light",
-                spawn=sim_utils.DomeLightCfg(
-                    intensity=1200.0,
-                    color=(0.8, 0.82, 0.85),
-                    visible_in_primary_ray=False,
-                ),
+                spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75)),
             )
             robot: ArticulationCfg = robot_cfg
             contact_forces = ContactSensorCfg(
@@ -158,7 +218,10 @@ class IsaacLabSimBackend:
         # fired during reset, and that callback is what populates Camera._ALL_INDICES.
         # Creating it afterwards yields a camera that raises AttributeError on first use.
         if enable_camera:
-            self._apply_visual_materials(sim_utils)
+            # No robot visual material is bound. TDMPC2 binds none either, so its Go2
+            # renders in the converter's default white -- matching that is the point.
+            # (The override that used to live here was also silently failing: the frame
+            # showed a white robot, not the dark grey it asked for.)
             self._setup_camera(sim_utils)
 
         self.sim.reset()
@@ -177,29 +240,6 @@ class IsaacLabSimBackend:
         )
 
         self._base_friction: Optional[torch.Tensor] = None
-
-    def _apply_visual_materials(self, sim_utils: Any) -> None:
-        """Give the robot a visible surface.
-
-        The URDF->USD conversion drops the source materials entirely -- the converted USD
-        contains zero ``UsdPreviewSurface`` prims -- so every link renders with the default
-        white surface. A white robot lit by a bright dome is what makes the recording
-        unreadable. The DAE meshes specify a near-black body (``diffuse 0 0 0``), so bind
-        an approximation of that; slightly above black so the form still catches light.
-
-        Cosmetic only, and applied solely when recording, so it cannot affect training.
-        """
-        try:
-            body_path = "/World/Looks/Go2Body"
-            body = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.12, 0.12, 0.13), roughness=0.5, metallic=0.1)
-            body.func(body_path, body)
-
-            targets = sim_utils.find_matching_prim_paths("/World/envs/env_.*/Robot/.*/visuals")
-            for path in targets:
-                sim_utils.bind_visual_material(path, body_path)
-            print(f"[go2/isaaclab] bound body material to {len(targets)} visual prims")
-        except Exception as exc:  # noqa: BLE001 - cosmetic, never fail the run over it
-            print(f"[go2/isaaclab] visual material binding failed (cosmetic only): {exc}")
 
     def _setup_camera(self, sim_utils: Any) -> None:
         """Prepare the viewport render path used for recording.
@@ -237,17 +277,38 @@ class IsaacLabSimBackend:
             self._camera = None
 
     @staticmethod
-    def _build_urdf_spawn_cfg(sim_utils: Any, merged_urdf: str) -> Any:
+    def _build_urdf_spawn_cfg(sim_utils: Any, merged_urdf: str, asset_source: str = "genesis_merged") -> Any:
         """Build a ``UrdfFileCfg`` across IsaacLab converter API revisions.
 
         2.3 nests drive settings under ``joint_drive=JointDriveCfg(gains=PDGainsCfg(...))``;
         2.1 exposes flat ``default_drive_*`` fields. We want a drive with zero gains either
         way, because the shared PD law is what actually drives the robot.
+
+        ``asset_source`` selects between the two robot descriptions. The settings that
+        differ are exactly the ones TDMPC2 sets in ``_make_go2_urdf_spawn_cfg``: it leaves
+        ``merge_fixed_joints`` at IsaacLab's default (True) because its URDF is unmerged,
+        turns cylinders into capsules, and runs a stiffer solver (8/4 rather than 4/0).
         """
+        is_unitree = asset_source == "unitree_urdf"
+
         common = dict(
             asset_path=merged_urdf,
             fix_base=False,
-            merge_fixed_joints=False,
+            # genesis_merged is already merged by go2_urdf.py, so ask the importer to keep
+            # every link. The upstream asset is unmerged and TDMPC2 never sets this, so it
+            # gets IsaacLab's default of True.
+            #
+            # Note what that default actually does under Isaac Sim 5.1: a fixed-joint child
+            # is merged only when it carries no mass. Measured on the upstream file, 42
+            # links become 31 -- calflower/calflower1/front_camera (no <inertial>) and
+            # imu/radar (mass 0.0) fold in, while the twelve 0.089 kg *_rotor links, the
+            # 0.001 kg heads, and the 0.04 kg feet all survive as separate bodies. The feet
+            # surviving is load-bearing and is pure luck: they are kept because they weigh
+            # 40 g, not because anything asked for them.
+            merge_fixed_joints=True if is_unitree else False,
+            # Upstream ships cylinder collision primitives; TDMPC2 converts them to
+            # capsules, which changes contact geometry, so it is part of the asset choice.
+            replace_cylinders_with_capsules=is_unitree,
             # Without this PhysX attaches no contact-reporter API to the bodies and the
             # ContactSensor fails to initialise. Genesis reports contact forces for every
             # link unconditionally; on PhysX it is opt-in at spawn time. The environment
@@ -271,8 +332,8 @@ class IsaacLabSimBackend:
                 # Genesis runs with enable_self_collision=True, so match it here rather
                 # than copying IsaacLab's quadruped default of False.
                 enabled_self_collisions=True,
-                solver_position_iteration_count=4,
-                solver_velocity_iteration_count=0,
+                solver_position_iteration_count=8 if is_unitree else 4,
+                solver_velocity_iteration_count=4 if is_unitree else 0,
             ),
         )
 
@@ -312,9 +373,8 @@ class IsaacLabSimBackend:
         self.resolved_dof_names = list(names)
         return list(ids)
 
-    def resolve_link_indices(self, name_substrings: Sequence[str]) -> list[int]:
-        # Substring matching in body order -- mirrors Genesis's find_link_indices.
-        return [i for i, name in enumerate(self.body_names) if any(s in name for s in name_substrings)]
+    def resolve_link_indices(self, name_patterns: Sequence[str]) -> list[int]:
+        return resolve_link_indices_by_pattern(self.body_names, name_patterns)
 
     def get_dof_pos_limits(self, dof_indices: Sequence[int]) -> torch.Tensor:
         limits = self.robot.data.joint_pos_limits[0, list(dof_indices), :]
