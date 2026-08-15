@@ -900,6 +900,7 @@ def get_env(
     pd_stiffness: Optional[float] = None,
     pd_damping: Optional[float] = None,
     dof_armature: Optional[float] = None,
+    show_viewer: bool = False,
 ) -> Go2WalkEnv:
     env_cfg, obs_cfg, reward_cfg, command_cfg = get_cfgs()
     if asset_source is not None:
@@ -961,7 +962,7 @@ def get_env(
         obs_cfg=obs_cfg,
         reward_cfg=reward_cfg,
         command_cfg=command_cfg,
-        show_viewer=False,
+        show_viewer=show_viewer,
         eval=eval_mode,
         debug=False,
         sim_backend=sim_backend,
